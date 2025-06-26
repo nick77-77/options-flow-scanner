@@ -3,8 +3,6 @@ import httpx
 import csv
 from datetime import datetime, date
 from collections import defaultdict
-import pandas as pd
-from io import StringIO
 
 # --- CONFIGURATION ---
 class Config:
@@ -32,8 +30,7 @@ params = {
     'rule_name[]': ['RepeatedHits', 'RepeatedHitsAscendingFill', 'RepeatedHitsDescendingFill'],
     'limit': config.LIMIT
 }
-
-url = 'https://api.unusualwhales.com/api/option-trades/flow-alerts '
+url = 'https://api.unusualwhales.com/api/option-trades/flow-alerts'
 
 # --- HELPER FUNCTIONS ---
 def parse_option_chain(opt_str):
@@ -102,17 +99,17 @@ def calculate_sentiment_score(trades):
 # --- MAIN FUNCTIONS ---
 def fetch_trades():
     """Fetch and process option flow data"""
-    st.info("🔄 Fetching unusual options flow...")
+    st.write("🔄 Fetching unusual options flow...")
     try:
         response = httpx.get(url, headers=headers, params=params, timeout=30)
         if response.status_code != 200:
-            st.error(f"❌ API Error: {response.status_code} - {response.text}")
+            st.write(f"❌ API Error: {response.status_code} - {response.text}")
             return []
         data = response.json()
         trades = data.get('data', [])
-        st.success(f"✅ Retrieved {len(trades)} potential trades")
+        st.write(f"✅ Retrieved {len(trades)} potential trades")
     except Exception as e:
-        st.error(f"❌ Error fetching data: {e}")
+        st.write(f"❌ Error fetching data: {e}")
         return []
 
     result = []
@@ -148,7 +145,7 @@ def fetch_trades():
             'sentiment': trade.get('sentiment', 'N/A'),
             'rule': trade.get('rule_name', 'N/A')
         })
-    st.info(f"📊 Processed {len(result)} trades (filtered out {filtered_count})")
+    st.write(f"📊 Processed {len(result)} trades (filtered out {filtered_count})")
     return result
 
 def analyze_flow_by_ticker(trades):
@@ -179,44 +176,62 @@ def analyze_flow_by_ticker(trades):
 
 def display_summary(trades):
     if not trades:
-        st.error("❌ No trades found matching criteria")
+        st.write("❌ No trades found matching criteria")
         return
+    st.markdown("---")
+    st.write(f"📈 UNUSUAL OPTIONS FLOW SUMMARY - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    st.markdown("---")
 
-    st.markdown("### 📈 Market Summary")
     sentiment_ratio, sentiment_label = calculate_sentiment_score(trades)
-    df_summary = pd.DataFrame({
-        'Metric': [
-            'Total Premium ($)',
-            'Market Sentiment',
-            'Total Trades'
-        ],
-        'Value': [
-            f"${sum(t['premium'] for t in trades):,.0f}",
-            f"{sentiment_label} ({sentiment_ratio:.1%} calls)",
-            len(trades)
-        ]
-    })
-    st.dataframe(df_summary, hide_index=True, use_container_width=True)
+    total_premium = sum(t['premium'] for t in trades)
+    st.write(f"💰 Total Premium: ${total_premium:,.0f}")
+    st.write(f"🎯 Market Sentiment: {sentiment_label} ({sentiment_ratio:.1%} calls)")
+    st.write(f"📊 Total Trades: {len(trades)}")
 
     ticker_data = analyze_flow_by_ticker(trades)
     top_tickers = sorted(ticker_data.items(),
                          key=lambda x: x[1]['call_premium'] + x[1]['put_premium'],
                          reverse=True)[:10]
-
-    st.markdown("### 🏆 Top 10 Tickers by Premium")
-    top_data = []
+    st.write("\n🏆 TOP 10 TICKERS BY PREMIUM")
+    st.markdown("-" * 60)
     for i, (ticker, data) in enumerate(top_tickers, 1):
         total_prem = data['call_premium'] + data['put_premium']
-        top_data.append({
-            'Rank': i,
-            'Ticker': ticker,
-            'Premium ($)': f"${total_prem:,.0f}",
-            'Sentiment': data['sentiment'],
-            '# Trades': len(data['trades'])
-        })
+        st.write(f"{i:2d}. {ticker:5s} | ${total_prem:8,.0f} | "
+                 f"{data['sentiment']:8s} | {len(data['trades'])} trades")
 
-    df_top = pd.DataFrame(top_data)
-    st.dataframe(df_top, hide_index=True, use_container_width=True)
+def display_trading_opportunities(trades):
+    categories = {}
+    for trade in trades:
+        cat = trade['dte_category']
+        if cat not in categories:
+            categories[cat] = {'calls': [], 'puts': []}
+        trade_type = 'calls' if trade['type'] == 'C' else 'puts'
+        categories[cat][trade_type].append(trade)
+
+    for category in ['0DTE', 'Weekly', 'Monthly', 'Quarterly']:
+        if category not in categories:
+            continue
+        calls = sorted(categories[category]['calls'], key=lambda x: -x['premium'])[:5]
+        puts = sorted(categories[category]['puts'], key=lambda x: -x['premium'])[:5]
+        if calls or puts:
+            st.write(f"\n{'🔥' if category == '0DTE' else '📅'} {category.upper()} OPPORTUNITIES")
+            st.markdown("=" * 70)
+            if calls:
+                st.write("\n🟢 TOP CALLS")
+                st.markdown("-" * 50)
+                for i, t in enumerate(calls, 1):
+                    st.write(f"{i}. {t['ticker']:5s} ${t['strike']:6.0f}C {t['expiry']} "
+                             f"({t['dte']}d) | ${t['price']:5s} | "
+                             f"Prem: ${t['premium']:8,.0f} | Vol: {t['volume']:4d} | "
+                             f"{t['moneyness']:12s}")
+            if puts:
+                st.write("\n🔴 TOP PUTS")
+                st.markdown("-" * 50)
+                for i, t in enumerate(puts, 1):
+                    st.write(f"{i}. {t['ticker']:5s} ${t['strike']:6.0f}P {t['expiry']} "
+                             f"({t['dte']}d) | ${t['price']:5s} | "
+                             f"Prem: ${t['premium']:8,.0f} | Vol: {t['volume']:4d} | "
+                             f"{t['moneyness']:12s}")
 
 def display_alerts(trades):
     alerts = []
@@ -244,54 +259,44 @@ def display_alerts(trades):
             alerts.append(trade)
     if alerts:
         alerts.sort(key=lambda x: -x['alert_score'])
-
-        alert_data = []
+        st.write(f"\n🚨 HIGH CONVICTION ALERTS ({len(alerts)} trades)")
+        st.markdown("=" * 70)
         for i, alert in enumerate(alerts[:10], 1):
-            alert_data.append({
-                'Alert': f"{i}. 🎯 {alert['ticker']} ${alert['strike']:.0f}{alert['type']} {alert['expiry']} ({alert['dte']}d)",
-                'Premium': f"${alert['premium']:,.0f}",
-                'Price': f"${alert['price']}",
-                'Volume': alert['volume'],
-                'Moneyness': alert['moneyness'],
-                'Reasons': ', '.join(alert['reasons'])
-            })
+            st.write(f"\n{i:2d}. 🎯 {alert['ticker']} ${alert['strike']:.0f}{alert['type']} "
+                     f"{alert['expiry']} ({alert['dte']}d)")
+            st.write(f"    💰 Premium: ${alert['premium']:,.0f} | Price: ${alert['price']} | "
+                     f"Vol: {alert['volume']} | {alert['moneyness']}")
+            st.write(f"    📍 Reasons: {', '.join(alert['reasons'])}")
 
-        df_alerts = pd.DataFrame(alert_data)
-        st.markdown("### 🚨 High Conviction Alerts")
-        st.dataframe(df_alerts, hide_index=True, use_container_width=True)
-
-def save_enhanced_csv(trades):
+def save_enhanced_csv(trades, filename=None):
     if not trades:
-        st.error("❌ No trades to save")
-        return ""
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    filename = f'options_flow_{timestamp}.csv'
-
+        st.write("❌ No trades to save")
+        return
+    if filename is None:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f'options_flow_{timestamp}.csv'
     fieldnames = [
         'ticker', 'option', 'type', 'strike', 'expiry', 'dte', 'dte_category',
         'price', 'premium', 'volume', 'oi', 'vol_oi_ratio', 'underlying_price',
         'moneyness', 'time', 'sentiment', 'rule', 'alert_score', 'reasons'
     ]
-
     clean_trades = []
     for trade in trades:
         clean_trade = {}
         for field in fieldnames:
             if field == 'reasons' and field in trade:
-                clean_trade[field] = ', '.join(trade[field]) if isinstance(trade[field], list) else ''
+                clean_trade[field] = ', '.join(trade[field]) if isinstance(trade[field], list) else trade.get(field, '')
             else:
                 clean_trade[field] = trade.get(field, '')
         clean_trades.append(clean_trade)
-
-    output = StringIO()
-    writer = csv.DictWriter(output, fieldnames=fieldnames)
-    writer.writeheader()
-    writer.writerows(clean_trades)
-    return output.getvalue()
+    with open(filename, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(clean_trades)
+    st.write(f"💾 Saved {len(trades)} trades to {filename}")
 
 # --- STREAMLIT UI ---
-st.set_page_config(page_title="Options Flow Scanner", page_icon="🐋", layout="wide")
-
+st.set_page_config(page_title="Options Flow Scanner", page_icon="🐋")
 st.title("🐋 Unusual Whales Options Flow Scanner")
 st.markdown("Powered by [Unusual Whales API](https://unusualwhales.com )")
 
@@ -300,17 +305,7 @@ if st.button("Run Options Flow Scanner"):
     if not trades:
         st.error("❌ No data retrieved. Check your API token and connection.")
     else:
-        with st.expander("📈 Market Summary", expanded=True):
-            display_summary(trades)
-        with st.expander("🟢/🔴 Trading Opportunities", expanded=True):
-            display_trading_opportunities(trades)
-        with st.expander("🚨 High Conviction Alerts", expanded=True):
-            display_alerts(trades)
-
-        csv_data = save_enhanced_csv(trades)
-        st.download_button(
-            label="📥 Download Report",
-            data=csv_data,
-            file_name=f"options_flow_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime='text/csv'
-        )
+        display_summary(trades)
+        display_alerts(trades)
+        display_trading_opportunities(trades)
+        save_enhanced_csv(trades)
