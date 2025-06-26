@@ -30,7 +30,7 @@ params = {
     'rule_name[]': ['RepeatedHits', 'RepeatedHitsAscendingFill', 'RepeatedHitsDescendingFill'],
     'limit': config.LIMIT
 }
-url = 'https://api.unusualwhales.com/api/option-trades/flow-alerts '
+url = 'https://api.unusualwhales.com/api/option-trades/flow-alerts'
 
 # --- HELPER FUNCTIONS ---
 def parse_option_chain(opt_str):
