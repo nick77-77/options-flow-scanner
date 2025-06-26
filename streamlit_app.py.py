@@ -1,18 +1,12 @@
+import streamlit as st
 import httpx
 import csv
 from datetime import datetime, date
 from collections import defaultdict
 
-# Rich for beautiful terminal output
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
-from rich.text import Text
-from rich import print as rprint
-
 # --- CONFIGURATION ---
 class Config:
-    UW_TOKEN = "e6e8601a-0746-4cec-a07d-c3eabfc13926"
+    UW_TOKEN = st.secrets.get("UW_TOKEN", "e6e8601a-0746-4cec-a07d-c3eabfc13926")
     EXCLUDE_TICKERS = {'TSLA', 'MSTR', 'CRCL'}
     MIN_PREMIUM = 100000  # $100k minimum
     LIMIT = 250
@@ -23,12 +17,9 @@ class Config:
 
 config = Config()
 
-# Initialize rich console
-console = Console(color_system="auto")
-
 # --- API SETUP ---
 headers = {
-    'Accept': 'application/json',
+    'Accept': 'application/json, text/plain',
     'Authorization': config.UW_TOKEN
 }
 
@@ -39,8 +30,7 @@ params = {
     'rule_name[]': ['RepeatedHits', 'RepeatedHitsAscendingFill', 'RepeatedHitsDescendingFill'],
     'limit': config.LIMIT
 }
-
-url = 'https://unusualwhales.com/api/options_flow '  # Valid endpoint
+url = 'https://api.unusualwhales.com/api/option-trades/flow-alerts'
 
 # --- HELPER FUNCTIONS ---
 def parse_option_chain(opt_str):
@@ -55,7 +45,7 @@ def parse_option_chain(opt_str):
         strike = int(opt_str[date_start + 7:]) / 1000
         return ticker, expiry_date.strftime('%Y-%m-%d'), dte, option_type.upper(), strike
     except Exception as e:
-        console.print(f"[red]Error parsing option chain {opt_str}: {e}[/red]")
+        st.write(f"Error parsing option chain {opt_str}: {e}")
         return None, None, None, None, None
 
 def calculate_moneyness(strike, current_price):
@@ -109,17 +99,17 @@ def calculate_sentiment_score(trades):
 # --- MAIN FUNCTIONS ---
 def fetch_trades():
     """Fetch and process option flow data"""
-    console.print("🔄 [bold blue]Fetching unusual options flow...[/bold blue]")
+    st.write("🔄 Fetching unusual options flow...")
     try:
         response = httpx.get(url, headers=headers, params=params, timeout=30)
         if response.status_code != 200:
-            console.print(f"[red]❌ API Error: {response.status_code} - {response.text}[/red]")
+            st.write(f"❌ API Error: {response.status_code} - {response.text}")
             return []
         data = response.json()
         trades = data.get('data', [])
-        console.print(f"[green]✅ Retrieved {len(trades)} potential trades[/green]")
+        st.write(f"✅ Retrieved {len(trades)} potential trades")
     except Exception as e:
-        console.print(f"[red]❌ Error fetching data: {e}[/red]")
+        st.write(f"❌ Error fetching data: {e}")
         return []
 
     result = []
@@ -155,7 +145,7 @@ def fetch_trades():
             'sentiment': trade.get('sentiment', 'N/A'),
             'rule': trade.get('rule_name', 'N/A')
         })
-    console.print(f"[blue]📊 Processed {len(result)} trades (filtered out {filtered_count})[/blue]")
+    st.write(f"📊 Processed {len(result)} trades (filtered out {filtered_count})")
     return result
 
 def analyze_flow_by_ticker(trades):
@@ -186,51 +176,62 @@ def analyze_flow_by_ticker(trades):
 
 def display_summary(trades):
     if not trades:
-        console.print("[red]❌ No trades found matching criteria[/red]")
+        st.write("❌ No trades found matching criteria")
         return
-
-    console.rule("[bold blue]🐋 Unusual Whales Options Flow Scanner[/bold blue]")
-    console.print(Panel.fit(
-        "[bold]📈 UNUSUAL OPTIONS FLOW SUMMARY[/bold]\n[dim]" +
-        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}[/dim]",
-        border_style="blue"
-    ))
+    st.markdown("---")
+    st.write(f"📈 UNUSUAL OPTIONS FLOW SUMMARY - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    st.markdown("---")
 
     sentiment_ratio, sentiment_label = calculate_sentiment_score(trades)
     total_premium = sum(t['premium'] for t in trades)
-    console.print(f"[bold]💰 Total Premium:[/bold] ${total_premium:,.0f}")
-    console.print(f"[bold]🎯 Market Sentiment:[/bold] {sentiment_label} ({sentiment_ratio:.1%} calls)")
-    console.print(f"[bold]📊 Total Trades:[/bold] {len(trades)}")
+    st.write(f"💰 Total Premium: ${total_premium:,.0f}")
+    st.write(f"🎯 Market Sentiment: {sentiment_label} ({sentiment_ratio:.1%} calls)")
+    st.write(f"📊 Total Trades: {len(trades)}")
 
     ticker_data = analyze_flow_by_ticker(trades)
     top_tickers = sorted(ticker_data.items(),
                          key=lambda x: x[1]['call_premium'] + x[1]['put_premium'],
                          reverse=True)[:10]
-
-    table = Table(title="🏆 Top 10 Tickers by Premium", show_header=True, header_style="bold magenta")
-    table.add_column("Rank", justify="center")
-    table.add_column("Ticker", justify="center")
-    table.add_column("Premium ($)", justify="right")
-    table.add_column("Sentiment", justify="center")
-    table.add_column("Trades", justify="center")
-
+    st.write("\n🏆 TOP 10 TICKERS BY PREMIUM")
+    st.markdown("-" * 60)
     for i, (ticker, data) in enumerate(top_tickers, 1):
         total_prem = data['call_premium'] + data['put_premium']
-        sentiment_color = {
-            "Bullish": "green",
-            "Bearish": "red",
-            "Mixed": "yellow",
-            "Neutral": "white"
-        }.get(data['sentiment'], "white")
-        table.add_row(
-            str(i),
-            ticker,
-            f"[bold]{total_prem:,.0f}[/bold]",
-            f"[{sentiment_color}]{data['sentiment']}[/{sentiment_color}]",
-            str(len(data['trades']))
-        )
+        st.write(f"{i:2d}. {ticker:5s} | ${total_prem:8,.0f} | "
+                 f"{data['sentiment']:8s} | {len(data['trades'])} trades")
 
-    console.print(table)
+def display_trading_opportunities(trades):
+    categories = {}
+    for trade in trades:
+        cat = trade['dte_category']
+        if cat not in categories:
+            categories[cat] = {'calls': [], 'puts': []}
+        trade_type = 'calls' if trade['type'] == 'C' else 'puts'
+        categories[cat][trade_type].append(trade)
+
+    for category in ['0DTE', 'Weekly', 'Monthly', 'Quarterly']:
+        if category not in categories:
+            continue
+        calls = sorted(categories[category]['calls'], key=lambda x: -x['premium'])[:5]
+        puts = sorted(categories[category]['puts'], key=lambda x: -x['premium'])[:5]
+        if calls or puts:
+            st.write(f"\n{'🔥' if category == '0DTE' else '📅'} {category.upper()} OPPORTUNITIES")
+            st.markdown("=" * 70)
+            if calls:
+                st.write("\n🟢 TOP CALLS")
+                st.markdown("-" * 50)
+                for i, t in enumerate(calls, 1):
+                    st.write(f"{i}. {t['ticker']:5s} ${t['strike']:6.0f}C {t['expiry']} "
+                             f"({t['dte']}d) | ${t['price']:5s} | "
+                             f"Prem: ${t['premium']:8,.0f} | Vol: {t['volume']:4d} | "
+                             f"{t['moneyness']:12s}")
+            if puts:
+                st.write("\n🔴 TOP PUTS")
+                st.markdown("-" * 50)
+                for i, t in enumerate(puts, 1):
+                    st.write(f"{i}. {t['ticker']:5s} ${t['strike']:6.0f}P {t['expiry']} "
+                             f"({t['dte']}d) | ${t['price']:5s} | "
+                             f"Prem: ${t['premium']:8,.0f} | Vol: {t['volume']:4d} | "
+                             f"{t['moneyness']:12s}")
 
 def display_alerts(trades):
     alerts = []
@@ -256,79 +257,20 @@ def display_alerts(trades):
             trade['alert_score'] = score
             trade['reasons'] = reasons
             alerts.append(trade)
-
     if alerts:
         alerts.sort(key=lambda x: -x['alert_score'])
-        console.print("\n🚨 [bold red]HIGH CONVICTION ALERTS[/bold red]", end="")
-        console.print(f" ([cyan]{len(alerts)}[/cyan] trades)\n")
-
+        st.write(f"\n🚨 HIGH CONVICTION ALERTS ({len(alerts)} trades)")
+        st.markdown("=" * 70)
         for i, alert in enumerate(alerts[:10], 1):
-            console.print(f"[bold]{i:2d}. 🎯 {alert['ticker']} ${alert['strike']:.0f}{alert['type']} "
-                          f"{alert['expiry']} ({alert['dte']}d)[/bold]")
-            console.print(f"    💰 Premium: ${alert['premium']:,.0f} | Price: ${alert['price']} | "
-                          f"Vol: {alert['volume']} | {alert['moneyness']}")
-            console.print(f"    📍 Reasons: {', '.join(alert['reasons'])}\n")
-
-def display_trading_opportunities(trades):
-    categories = {}
-    for trade in trades:
-        cat = trade['dte_category']
-        if cat not in categories:
-            categories[cat] = {'calls': [], 'puts': []}
-        trade_type = 'calls' if trade['type'] == 'C' else 'puts'
-        categories[cat][trade_type].append(trade)
-
-    for category in ['0DTE', 'Weekly', 'Monthly', 'Quarterly']:
-        if category not in categories:
-            continue
-        calls = sorted(categories[category]['calls'], key=lambda x: -x['premium'])[:5]
-        puts = sorted(categories[category]['puts'], key=lambda x: -x['premium'])[:5]
-        if calls or puts:
-            emoji = '🔥' if category == '0DTE' else '📅'
-            console.print(f"\n[bold cyan]{emoji} {category.upper()} OPPORTUNITIES[/bold cyan]")
-            console.print("=" * 70)
-
-            if calls:
-                call_table = Table(title="🟢 Top Call Opportunities", show_header=True, header_style="bold green")
-                call_table.add_column("Ticker")
-                call_table.add_column("Strike")
-                call_table.add_column("Expiry")
-                call_table.add_column("DTE")
-                call_table.add_column("Premium")
-                call_table.add_column("Volume")
-                for t in calls:
-                    call_table.add_row(
-                        t['ticker'],
-                        f"${t['strike']:.2f}",
-                        t['expiry'],
-                        str(t['dte']),
-                        f"${t['premium']:,.0f}",
-                        str(t['volume'])
-                    )
-                console.print(call_table)
-
-            if puts:
-                put_table = Table(title="🔴 Top Put Opportunities", show_header=True, header_style="bold red")
-                put_table.add_column("Ticker")
-                put_table.add_column("Strike")
-                put_table.add_column("Expiry")
-                put_table.add_column("DTE")
-                put_table.add_column("Premium")
-                put_table.add_column("Volume")
-                for t in puts:
-                    put_table.add_row(
-                        t['ticker'],
-                        f"${t['strike']:.2f}",
-                        t['expiry'],
-                        str(t['dte']),
-                        f"${t['premium']:,.0f}",
-                        str(t['volume'])
-                    )
-                console.print(put_table)
+            st.write(f"\n{i:2d}. 🎯 {alert['ticker']} ${alert['strike']:.0f}{alert['type']} "
+                     f"{alert['expiry']} ({alert['dte']}d)")
+            st.write(f"    💰 Premium: ${alert['premium']:,.0f} | Price: ${alert['price']} | "
+                     f"Vol: {alert['volume']} | {alert['moneyness']}")
+            st.write(f"    📍 Reasons: {', '.join(alert['reasons'])}")
 
 def save_enhanced_csv(trades, filename=None):
     if not trades:
-        console.print("[red]❌ No trades to save[/red]")
+        st.write("❌ No trades to save")
         return
     if filename is None:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -343,7 +285,7 @@ def save_enhanced_csv(trades, filename=None):
         clean_trade = {}
         for field in fieldnames:
             if field == 'reasons' and field in trade:
-                clean_trade[field] = ', '.join(trade[field]) if isinstance(trade[field], list) else ''
+                clean_trade[field] = ', '.join(trade[field]) if isinstance(trade[field], list) else trade.get(field, '')
             else:
                 clean_trade[field] = trade.get(field, '')
         clean_trades.append(clean_trade)
@@ -351,21 +293,19 @@ def save_enhanced_csv(trades, filename=None):
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(clean_trades)
-    console.print(f"[green]💾 Saved {len(trades)} trades to {filename}[/green]")
+    st.write(f"💾 Saved {len(trades)} trades to {filename}")
 
-def main():
-    console.print("[bold blue]🐋 Unusual Whales Options Flow Scanner[/bold blue]")
-    console.print("=" * 50)
+# --- STREAMLIT UI ---
+st.set_page_config(page_title="Options Flow Scanner", page_icon="🐋")
+st.title("🐋 Unusual Whales Options Flow Scanner")
+st.markdown("Powered by [Unusual Whales API](https://unusualwhales.com )")
+
+if st.button("Run Options Flow Scanner"):
     trades = fetch_trades()
     if not trades:
-        console.print("[red]❌ No data retrieved. Check your API token and connection.[/red]")
-        return
-    display_summary(trades)
-    display_alerts(trades)
-    display_trading_opportunities(trades)
-    save_enhanced_csv(trades)
-    console.print("\n[green]✅ Analysis complete![/green] Check the CSV file for detailed data.")
-    console.print("[bold yellow]💡 Focus on high conviction alerts for potential trades.[/bold yellow]")
-
-if __name__ == '__main__':
-    main()
+        st.error("❌ No data retrieved. Check your API token and connection.")
+    else:
+        display_summary(trades)
+        display_alerts(trades)
+        display_trading_opportunities(trades)
+        save_enhanced_csv(trades)
