@@ -6,7 +6,7 @@ from collections import defaultdict
 
 # --- CONFIGURATION ---
 class Config:
-    UW_TOKEN = st.secrets.get("UW_TOKEN", "e6e8601a-0746-4cec-a07d-c3eabfc13926")
+    UW_TOKEN = st.secrets["UW_TOKEN"]
     EXCLUDE_TICKERS = {'TSLA', 'MSTR', 'CRCL'}
     MIN_PREMIUM = 100000  # $100k minimum
     LIMIT = 250
