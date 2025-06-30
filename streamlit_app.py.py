@@ -239,7 +239,7 @@ def save_enhanced_csv(trades, filename=None):
         st.write("❌ No trades to save")
         return
     if filename is None:
-        filename = f'options_flow_{datetime.now().strftime(\"%Y%m%d_%H%M%S\")}.csv'
+        filename = f'options_flow_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
     fieldnames = [
         'ticker', 'option', 'type', 'strike', 'expiry', 'dte', 'dte_category',
         'price', 'premium', 'volume', 'oi', 'vol_oi_ratio', 'underlying_price',
