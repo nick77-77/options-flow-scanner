@@ -91,7 +91,6 @@ def calculate_sentiment_score(trades):
     else:
         return call_ratio, "Very Bearish"
 
-# --- MAIN FUNCTIONS ---
 def fetch_trades():
     st.write("🔄 Fetching unusual options flow...")
     try:
@@ -256,39 +255,37 @@ def save_enhanced_csv(trades, filename=None):
     st.success(f"💾 Saved to {filename}")
 
 # --- STREAMLIT UI ---
-st.set_page_config(page_title="Options Flow Scanner", page_icon="🐋", layout="wide")
-st.title("🐋 Unusual Whales Options Flow Scanner")
-st.markdown("Powered by [Unusual Whales API](https://unusualwhales.com)")
+st.set_page_config(page_title="Smart Flow Scanner", page_icon="📊", layout="wide")
+st.title("📊 Smart Options Flow Tracker")
 
-st.markdown("---")
 col1, col2 = st.columns([1, 4])
 with col1:
-    run_button = st.button("🔍 Run Scanner", use_container_width=True)
+    run_button = st.button("🔍 Scan Market", use_container_width=True)
 
 with col2:
-    st.markdown("### Insights Panel")
-    st.markdown("Use this tool to analyze high-volume, unusual options activity.")
+    st.markdown("### Market Pulse Dashboard")
+    st.markdown("Analyze intelligent options activity to uncover strategic trades.")
 
 st.markdown("---")
 
 if run_button:
-    with st.spinner("Fetching data..."):
+    with st.spinner("Fetching market activity..."):
         trades = fetch_trades()
 
     if not trades:
         st.error("❌ No data retrieved. Check your API token and connection.")
     else:
-        with st.expander("📈 Summary View", expanded=True):
+        with st.expander("📅 Trading Opportunities", expanded=True):
+            display_trading_opportunities(trades)
+
+        with st.expander("📈 Summary View", expanded=False):
             display_summary(trades)
 
         with st.expander("🚨 Alerts View", expanded=False):
             display_alerts(trades)
 
-        with st.expander("📅 Trading Opportunities", expanded=False):
-            display_trading_opportunities(trades)
-
         with st.expander("💾 Export Data", expanded=False):
             save_enhanced_csv(trades)
 
 st.markdown("---")
-st.caption("Built with ❤️ using Streamlit")
+st.caption("Developed with 💡 using Streamlit")
