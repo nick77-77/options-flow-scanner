@@ -3,6 +3,7 @@ import httpx
 from datetime import datetime, date
 from collections import defaultdict
 import pandas as pd
+import plotly.express as px
 from zoneinfo import ZoneInfo  # Python 3.9+
 
 # --- CONFIGURATION ---
@@ -24,12 +25,10 @@ headers = {
     'Accept': 'application/json, text/plain',
     'Authorization': config.UW_TOKEN
 }
-
-url = 'https://api.unusualwhales.com/api/option-trades/flow-alerts'
+url = 'https://api.unusualwhales.com/api/option-trades/flow-alerts '
 
 # --- HELPER FUNCTIONS ---
 def parse_option_chain(opt_str):
-    """Improved parsing using local script logic"""
     try:
         ticker = ''.join([c for c in opt_str if c.isalpha()])[:-1]
         date_start = len(ticker)
@@ -57,7 +56,6 @@ def detect_scenarios(trade, underlying_price=None):
     if underlying_price is None:
         underlying_price = strike
 
-    # Moneyness determination
     moneyness = "ATM"
     if opt_type == 'C' and strike > underlying_price:
         moneyness = "OTM"
@@ -94,7 +92,6 @@ def detect_scenarios(trade, underlying_price=None):
 
 
 def calculate_moneyness(strike, current_price):
-    """Calculate % ITM/OTM for display"""
     if current_price == 'N/A' or current_price == 0:
         return "Unknown"
     try:
@@ -259,6 +256,25 @@ def fetch_general_flow():
         return []
 
 
+# --- VISUALIZATIONS ---
+def visualize_market_summary(trades):
+    if not trades:
+        return
+
+    df = pd.DataFrame(trades)
+    df['scenario'] = df['scenarios'].apply(lambda x: x[0] if x else "Normal Flow")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        fig = px.pie(df, names='type', title="Call vs Put Distribution")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col2:
+        fig = px.histogram(df, x='scenario', title="Scenario Distribution")
+        st.plotly_chart(fig, use_container_width=True)
+
+
 # --- DISPLAY FUNCTIONS ---
 def display_dte_segregated(trades):
     calls_lt7 = [t for t in trades if t['type'] == 'C' and t['dte'] < 7]
@@ -358,6 +374,24 @@ def save_to_csv(trades, filename_prefix):
     )
 
 
+# --- FILTERING ---
+def apply_filters(trades):
+    st.sidebar.markdown("### 🔍 Filters")
+    ticker_filter = st.sidebar.multiselect("Filter by Ticker", sorted(set(t['ticker'] for t in trades)))
+    scenario_filter = st.sidebar.multiselect("Filter by Scenario", set(s for t in trades for s in t['scenarios']))
+    dte_filter = st.sidebar.slider("DTE Range", min_value=0, max_value=180, value=(0, 30))
+
+    filtered = trades
+    if ticker_filter:
+        filtered = [t for t in filtered if t['ticker'] in ticker_filter]
+    if scenario_filter:
+        filtered = [t for t in filtered if any(s in t['scenarios'] for s in scenario_filter)]
+    if dte_filter:
+        filtered = [t for t in filtered if dte_filter[0] <= t['dte'] <= dte_filter[1]]
+
+    return filtered
+
+
 # --- STREAMLIT UI ---
 st.set_page_config(page_title="Options Flow Tracker", page_icon="📊", layout="wide")
 st.title("📊 Comprehensive Options Flow Tracker")
@@ -390,15 +424,20 @@ if run_scan:
             with col3:
                 st.metric("Total Trades", len(trades))
 
+            trades = apply_filters(trades)
+            visualize_market_summary(trades)
+
             with st.expander("💾 Export Data", expanded=False):
                 save_to_csv(trades, "general_flow")
 
         elif "DTE" in scan_type:
+            trades = apply_filters(trades)
             display_dte_segregated(trades)
             with st.expander("💾 Export Data", expanded=False):
                 save_to_csv(trades, "dte_segregated_flow")
 
         elif "Alert" in scan_type:
+            trades = apply_filters(trades)
             display_alerts(trades)
             with st.expander("💾 Export Data", expanded=False):
                 save_to_csv(trades, "alerts")
