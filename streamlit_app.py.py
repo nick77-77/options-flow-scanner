@@ -1,10 +1,9 @@
 import streamlit as st
 import httpx
-import csv
 from datetime import datetime, date
 from collections import defaultdict
 import pandas as pd
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo  # Python 3.9+
 
 # --- CONFIGURATION ---
 class Config:
@@ -13,9 +12,10 @@ class Config:
     ALLOWED_TICKERS = {'QQQ', 'SPY', 'IWM'}
     MIN_PREMIUM = 100000
     LIMIT = 500
-    MIN_VOLUME = 50
-    MAX_SPREAD_PERCENT = 5
-    MIN_OI_RATIO = 0.5
+    SCENARIO_OTM_CALL_MIN_PREMIUM = 100000
+    SCENARIO_ITM_CONV_MIN_PREMIUM = 50000
+    SCENARIO_SWEEP_VOLUME_OI_RATIO = 2
+    SCENARIO_BLOCK_TRADE_VOL = 100
 
 config = Config()
 
@@ -24,26 +24,26 @@ headers = {
     'Accept': 'application/json, text/plain',
     'Authorization': config.UW_TOKEN
 }
+
 url = 'https://api.unusualwhales.com/api/option-trades/flow-alerts '
 
 # --- HELPER FUNCTIONS ---
 def parse_option_chain(opt_str):
-    """Parse option chain string to extract components"""
+    """Improved parsing using local script logic"""
     try:
-        idx = next(i for i, c in enumerate(opt_str) if c.isdigit())
-        ticker = opt_str[:idx].upper()
-        date_str = opt_str[idx:idx+6]
+        ticker = ''.join([c for c in opt_str if c.isalpha()])[:-1]
+        date_start = len(ticker)
+        date_str = opt_str[date_start:date_start+6]
         expiry_date = date(2000 + int(date_str[:2]), int(date_str[2:4]), int(date_str[4:6]))
         dte = (expiry_date - date.today()).days
-        option_type = opt_str[idx+6].upper()
-        strike = int(opt_str[idx+7:]) / 1000
+        option_type = opt_str[date_start+6].upper()
+        strike = int(opt_str[date_start+7:]) / 1000
         return ticker, expiry_date.strftime('%Y-%m-%d'), dte, option_type, strike
     except Exception:
         return None, None, None, None, None
 
 
 def detect_scenarios(trade, underlying_price=None):
-    """Detect meaningful trading patterns/scenarios"""
     scenarios = []
 
     opt_type = trade['type']
@@ -51,7 +51,7 @@ def detect_scenarios(trade, underlying_price=None):
     premium = trade['premium']
     volume = trade.get('volume', 0)
     oi = trade.get('oi', 0)
-    rule_name = trade.get('rule', '')
+    rule_name = trade.get('rule_name', '')
     ticker = trade['ticker']
 
     if underlying_price is None:
@@ -69,15 +69,15 @@ def detect_scenarios(trade, underlying_price=None):
         moneyness = "ITM"
 
     # Scenario logic...
-    if opt_type == 'C' and moneyness == 'OTM' and premium >= 100000:
+    if opt_type == 'C' and moneyness == 'OTM' and premium >= config.SCENARIO_OTM_CALL_MIN_PREMIUM:
         scenarios.append("Large OTM Call Buying")
-    if opt_type == 'P' and moneyness == 'OTM' and premium >= 100000:
+    if opt_type == 'P' and moneyness == 'OTM' and premium >= config.SCENARIO_OTM_CALL_MIN_PREMIUM:
         scenarios.append("Large OTM Put Buying")
-    if moneyness == 'ITM' and premium >= 50000:
+    if moneyness == 'ITM' and premium >= config.SCENARIO_ITM_CONV_MIN_PREMIUM:
         scenarios.append("ITM Conviction Trade")
-    if volume > oi * 2:
+    if volume > oi * config.SCENARIO_SWEEP_VOLUME_OI_RATIO:
         scenarios.append("Sweep Orders")
-    if volume >= 100:
+    if volume >= config.SCENARIO_BLOCK_TRADE_VOL:
         scenarios.append("Block Trade")
     if rule_name in ['RepeatedHits', 'RepeatedHitsAscendingFill']:
         scenarios.append("Repeated Buying at Same Strike")
@@ -94,7 +94,7 @@ def detect_scenarios(trade, underlying_price=None):
 
 
 def calculate_moneyness(strike, current_price):
-    """Calculate moneyness of option"""
+    """Calculate % ITM/OTM for display"""
     if current_price == 'N/A' or current_price == 0:
         return "Unknown"
     try:
@@ -111,7 +111,6 @@ def calculate_moneyness(strike, current_price):
 
 
 def get_time_to_expiry_category(dte):
-    """Categorize time to expiry"""
     if dte <= 1:
         return "0DTE"
     elif dte <= 7:
@@ -125,7 +124,6 @@ def get_time_to_expiry_category(dte):
 
 
 def calculate_sentiment_score(trades):
-    """Calculate overall market sentiment based on call/put premium"""
     call_premium = sum(t['premium'] for t in trades if t['type'] == 'C')
     put_premium = sum(t['premium'] for t in trades if t['type'] == 'P')
     total = call_premium + put_premium
@@ -145,39 +143,43 @@ def calculate_sentiment_score(trades):
 
 
 def generate_alerts(trades):
-    """Generate high-priority alerts based on trade characteristics"""
     alerts = []
     for trade in trades:
         score = 0
         reasons = []
-        premium = trade.get('premium', 0)
 
+        premium = trade.get('premium', 0)
         if premium > 500000:
             score += 3
             reasons.append("Massive Premium")
         elif premium > 250000:
             score += 2
             reasons.append("Large Premium")
+
         vol_oi_ratio = trade.get('vol_oi_ratio', 0)
         if vol_oi_ratio > 2:
             score += 2
             reasons.append("High Vol/OI")
+
         dte = trade.get('dte', 0)
         if dte <= 7 and premium > 200000:
             score += 2
             reasons.append("Short-term + Size")
+
         moneyness = trade.get('moneyness', '')
         if "ATM" in moneyness or ("OTM" in moneyness and "+5%" not in moneyness):
             score += 1
             reasons.append("Good Strike")
+
         if score >= 4:
             trade['alert_score'] = score
             trade['reasons'] = reasons
             alerts.append(trade)
+
     return sorted(alerts, key=lambda x: -x.get('alert_score', 0))
 
 
-# --- MAIN FETCH FUNCTION ---
+# --- FETCH FUNCTION ---
 def fetch_general_flow():
     params = {
         'issue_types[]': ['Common Stock', 'ADR'],
@@ -191,14 +193,12 @@ def fetch_general_flow():
         if response.status_code != 200:
             st.error(f"API Error: {response.status_code} - {response.text}")
             return []
-        data = response.json()
-        trades = data.get('data', [])
+        data = response.json().get('data', [])
         result = []
-
         ticker_data = defaultdict(list)
 
         # First pass: collect raw trades
-        for trade in trades:
+        for trade in data:
             option_chain = trade.get('option_chain', '')
             ticker, expiry, dte, opt_type, strike = parse_option_chain(option_chain)
 
@@ -232,9 +232,9 @@ def fetch_general_flow():
                 'oi': trade.get('open_interest', 0),
                 'time_utc': utc_time_str,
                 'time_ny': ny_time_str,
-                'rule': trade.get('rule_name', ''),
+                'rule_name': trade.get('rule_name', ''),
                 'description': trade.get('description', ''),
-                'underlying_price': trade.get('underlying_price', 'N/A'),
+                'underlying_price': trade.get('underlying_price', strike),
                 'moneyness': calculate_moneyness(strike, trade.get('underlying_price', strike)),
                 'vol_oi_ratio': trade.get('volume', 0) / max(trade.get('open_interest', 1), 1)
             }
@@ -259,59 +259,8 @@ def fetch_general_flow():
         return []
 
 
-def save_to_csv(trades, filename_prefix):
-    """Save trades to CSV"""
-    if not trades:
-        st.warning("No data to save")
-        return
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{filename_prefix}_{timestamp}.csv"
-    # Flatten the data for CSV
-    csv_data = []
-    for trade in trades:
-        row = trade.copy()
-        if isinstance(row.get('reasons'), list):
-            row['reasons'] = ', '.join(row['reasons'])
-        if isinstance(row.get('scenarios'), list):
-            row['scenarios'] = ', '.join(row['scenarios'])
-        csv_data.append(row)
-    df = pd.DataFrame(csv_data)
-    csv = df.to_csv(index=False)
-    st.download_button(
-        label=f"📥 Download {filename}",
-        data=csv,
-        file_name=filename,
-        mime="text/csv",
-        use_container_width=True
-    )
-
-
 # --- DISPLAY FUNCTIONS ---
-def display_alerts(trades):
-    alerts = generate_alerts(trades)
-    if not alerts:
-        st.info("No high-priority alerts found")
-        return
-    st.markdown("### 🚨 High Priority Alerts")
-    for i, alert in enumerate(alerts[:10], 1):
-        with st.container():
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                st.markdown(f"**{i}. {alert['ticker']} {alert['strike']:.0f}{alert['type']} "
-                            f"{alert['expiry']} ({alert['dte']}d)**")
-                st.write(f"💰 Premium: ${alert['premium']:,.0f} | Vol: {alert['volume']} | "
-                         f"{alert.get('moneyness', 'N/A')} | 🎯 Scenarios: {', '.join(alert.get('scenarios', []))}")
-                st.write(f"📍 Reasons: {', '.join(alert.get('reasons', []))}")
-            with col2:
-                st.metric("Alert Score", alert.get('alert_score', 0))
-            st.divider()
-
-
 def display_dte_segregated(trades):
-    if not trades:
-        st.warning("No trades to display")
-        return
-
     calls_lt7 = [t for t in trades if t['type'] == 'C' and t['dte'] < 7]
     calls_gte7 = [t for t in trades if t['type'] == 'C' and t['dte'] >= 7]
     puts_lt7 = [t for t in trades if t['type'] == 'P' and t['dte'] < 7]
@@ -363,6 +312,52 @@ def display_dte_segregated(trades):
             st.info("No puts ≥ 7 DTE")
 
 
+def display_alerts(trades):
+    alerts = generate_alerts(trades)
+    if not alerts:
+        st.info("No high-priority alerts found")
+        return
+    st.markdown("### 🚨 High Priority Alerts")
+    for i, alert in enumerate(alerts[:10], 1):
+        with st.container():
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.markdown(f"**{i}. {alert['ticker']} {alert['strike']:.0f}{alert['type']} "
+                            f"{alert['expiry']} ({alert['dte']}d)**")
+                st.write(f"💰 Premium: ${alert['premium']:,.0f} | Vol: {alert['volume']} | "
+                         f"{alert.get('moneyness', 'N/A')} | 🎯 Scenarios: {', '.join(alert.get('scenarios', []))}")
+                st.write(f"📍 Reasons: {', '.join(alert.get('reasons', []))}")
+            with col2:
+                st.metric("Alert Score", alert.get('alert_score', 0))
+            st.divider()
+
+
+# --- CSV EXPORT ---
+def save_to_csv(trades, filename_prefix):
+    if not trades:
+        st.warning("No data to save")
+        return
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{filename_prefix}_{timestamp}.csv"
+    csv_data = []
+    for trade in trades:
+        row = trade.copy()
+        if isinstance(row.get('reasons'), list):
+            row['reasons'] = ', '.join(row['reasons'])
+        if isinstance(row.get('scenarios'), list):
+            row['scenarios'] = ', '.join(row['scenarios'])
+        csv_data.append(row)
+    df = pd.DataFrame(csv_data)
+    csv = df.to_csv(index=False)
+    st.download_button(
+        label=f"📥 Download {filename}",
+        data=csv,
+        file_name=filename,
+        mime="text/csv",
+        use_container_width=True
+    )
+
+
 # --- STREAMLIT UI ---
 st.set_page_config(page_title="Options Flow Tracker", page_icon="📊", layout="wide")
 st.title("📊 Comprehensive Options Flow Tracker")
@@ -394,23 +389,6 @@ if run_scan:
                 st.metric("Total Premium", f"${total_premium:,.0f}")
             with col3:
                 st.metric("Total Trades", len(trades))
-
-            st.markdown("#### 🏆 Top Tickers by Premium")
-            ticker_analysis = analyze_flow_by_ticker(trades)
-            top_tickers = sorted(ticker_analysis.items(),
-                                 key=lambda x: x[1]['call_premium'] + x[1]['put_premium'], reverse=True)[:10]
-            ticker_df = []
-            for ticker, data in top_tickers:
-                total_prem = data['call_premium'] + data['put_premium']
-                ticker_df.append({
-                    'Ticker': ticker,
-                    'Premium': f"${total_prem:,.0f}",
-                    'Sentiment': data['sentiment'],
-                    'Trades': len(data['trades']),
-                    'Avg DTE': f"{data['avg_dte']:.1f}"
-                })
-            if ticker_df:
-                st.dataframe(pd.DataFrame(ticker_df), use_container_width=True)
 
             with st.expander("💾 Export Data", expanded=False):
                 save_to_csv(trades, "general_flow")
