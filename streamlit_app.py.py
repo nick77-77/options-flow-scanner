@@ -25,7 +25,7 @@ headers = {
     'Authorization': config.UW_TOKEN
 }
 
-url = 'https://api.unusualwhales.com/api/option-trades/flow-alerts '
+url = 'https://api.unusualwhales.com/api/option-trades/flow-alerts'
 
 # --- HELPER FUNCTIONS ---
 def parse_option_chain(opt_str):
