@@ -44,7 +44,6 @@ def parse_option_chain(opt_str):
 
 def detect_scenarios(trade, underlying_price=None):
     scenarios = []
-
     opt_type = trade['type']
     strike = trade['strike']
     premium = trade['premium']
@@ -66,7 +65,6 @@ def detect_scenarios(trade, underlying_price=None):
     elif opt_type == 'P' and strike > underlying_price:
         moneyness = "ITM"
 
-    # Scenario logic...
     if opt_type == 'C' and moneyness == 'OTM' and premium >= config.SCENARIO_OTM_CALL_MIN_PREMIUM:
         scenarios.append("Large OTM Call Buying")
     if opt_type == 'P' and moneyness == 'OTM' and premium >= config.SCENARIO_OTM_CALL_MIN_PREMIUM:
@@ -260,16 +258,12 @@ def fetch_general_flow():
 def visualize_market_summary(trades):
     if not trades:
         return
-
     df = pd.DataFrame(trades)
     df['scenario'] = df['scenarios'].apply(lambda x: x[0] if x else "Normal Flow")
-
     col1, col2 = st.columns(2)
-
     with col1:
         fig = px.pie(df, names='type', title="Call vs Put Distribution")
         st.plotly_chart(fig, use_container_width=True)
-
     with col2:
         fig = px.histogram(df, x='scenario', title="Scenario Distribution")
         st.plotly_chart(fig, use_container_width=True)
@@ -377,17 +371,22 @@ def save_to_csv(trades, filename_prefix):
 # --- FILTERING ---
 def apply_filters(trades):
     st.sidebar.markdown("### 🔍 Filters")
-    ticker_filter = st.sidebar.multiselect("Filter by Ticker", sorted(set(t['ticker'] for t in trades)))
-    scenario_filter = st.sidebar.multiselect("Filter by Scenario", set(s for t in trades for s in t['scenarios']))
-    dte_filter = st.sidebar.slider("DTE Range", min_value=0, max_value=180, value=(0, 30))
+    unique_tickers = sorted(set(t['ticker'] for t in trades))
+    selected_ticker = st.sidebar.selectbox("Filter by Ticker", ["All"] + unique_tickers)
+
+    all_scenarios = set(s for t in trades for s in t.get('scenarios', ["Normal Flow"]))
+    selected_scenario = st.sidebar.selectbox("Filter by Scenario", ["All"] + list(all_scenarios))
+
+    dte_min = min(t['dte'] for t in trades) if trades else 0
+    dte_max = max(t['dte'] for t in trades) if trades else 30
+    dte_range = st.sidebar.slider("DTE Range", min_value=dte_min, max_value=dte_max, value=(dte_min, dte_max))
 
     filtered = trades
-    if ticker_filter:
-        filtered = [t for t in filtered if t['ticker'] in ticker_filter]
-    if scenario_filter:
-        filtered = [t for t in filtered if any(s in t['scenarios'] for s in scenario_filter)]
-    if dte_filter:
-        filtered = [t for t in filtered if dte_filter[0] <= t['dte'] <= dte_filter[1]]
+    if selected_ticker != "All":
+        filtered = [t for t in filtered if t['ticker'] == selected_ticker]
+    if selected_scenario != "All":
+        filtered = [t for t in filtered if selected_scenario in t.get('scenarios', [])]
+    filtered = [t for t in filtered if dte_range[0] <= t['dte'] <= dte_range[1]]
 
     return filtered
 
@@ -426,7 +425,6 @@ if run_scan:
 
             trades = apply_filters(trades)
             visualize_market_summary(trades)
-
             with st.expander("💾 Export Data", expanded=False):
                 save_to_csv(trades, "general_flow")
 
