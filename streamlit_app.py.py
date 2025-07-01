@@ -192,7 +192,6 @@ def fetch_general_flow():
         result = []
         ticker_data = defaultdict(list)
 
-        # First pass: collect raw trades
         for trade in data:
             option_chain = trade.get('option_chain', '')
             ticker, expiry, dte, opt_type, strike = parse_option_chain(option_chain)
@@ -236,7 +235,6 @@ def fetch_general_flow():
 
             ticker_data[ticker].append(trade_data)
 
-        # Second pass: enrich with scenario detection
         for ticker, trade_list in ticker_data.items():
             atm_calls = [t['strike'] for t in trade_list if t['type'] == 'C']
             avg_underlying_price = sum(atm_calls) / len(atm_calls) if atm_calls else None
@@ -368,29 +366,6 @@ def save_to_csv(trades, filename_prefix):
     )
 
 
-# --- FILTERING ---
-def apply_filters(trades):
-    st.sidebar.markdown("### 🔍 Filters")
-    unique_tickers = sorted(set(t['ticker'] for t in trades))
-    selected_ticker = st.sidebar.selectbox("Filter by Ticker", ["All"] + unique_tickers)
-
-    all_scenarios = set(s for t in trades for s in t.get('scenarios', ["Normal Flow"]))
-    selected_scenario = st.sidebar.selectbox("Filter by Scenario", ["All"] + list(all_scenarios))
-
-    dte_min = min(t['dte'] for t in trades) if trades else 0
-    dte_max = max(t['dte'] for t in trades) if trades else 30
-    dte_range = st.sidebar.slider("DTE Range", min_value=dte_min, max_value=dte_max, value=(dte_min, dte_max))
-
-    filtered = trades
-    if selected_ticker != "All":
-        filtered = [t for t in filtered if t['ticker'] == selected_ticker]
-    if selected_scenario != "All":
-        filtered = [t for t in filtered if selected_scenario in t.get('scenarios', [])]
-    filtered = [t for t in filtered if dte_range[0] <= t['dte'] <= dte_range[1]]
-
-    return filtered
-
-
 # --- STREAMLIT UI ---
 st.set_page_config(page_title="Options Flow Tracker", page_icon="📊", layout="wide")
 st.title("📊 Comprehensive Options Flow Tracker")
@@ -423,19 +398,16 @@ if run_scan:
             with col3:
                 st.metric("Total Trades", len(trades))
 
-            trades = apply_filters(trades)
             visualize_market_summary(trades)
             with st.expander("💾 Export Data", expanded=False):
                 save_to_csv(trades, "general_flow")
 
         elif "DTE" in scan_type:
-            trades = apply_filters(trades)
             display_dte_segregated(trades)
             with st.expander("💾 Export Data", expanded=False):
                 save_to_csv(trades, "dte_segregated_flow")
 
         elif "Alert" in scan_type:
-            trades = apply_filters(trades)
             display_alerts(trades)
             with st.expander("💾 Export Data", expanded=False):
                 save_to_csv(trades, "alerts")
