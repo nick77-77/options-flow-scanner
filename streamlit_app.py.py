@@ -15,7 +15,7 @@ class Config:
     EXCLUDE_TICKERS = {'TSLA', 'MSTR', 'CRCL'}
     ALLOWED_TICKERS = {'QQQ', 'SPY', 'IWM'}
     MIN_PREMIUM = 50000  # Lowered to catch more activity
-    LIMIT = 3000  # Increased for better analysis
+    LIMIT = 1000  # Increased for better analysis
     SCENARIO_OTM_CALL_MIN_PREMIUM = 100000
     SCENARIO_ITM_CONV_MIN_PREMIUM = 50000
     SCENARIO_SWEEP_VOLUME_OI_RATIO = 2
@@ -550,6 +550,10 @@ if run_scan:
     with st.spinner(f"Running {scan_type}..."):
         trades = fetch_enhanced_flow()
         
+        if not trades:
+            st.error("No trades fetched from API. Check your API token or connection.")
+            st.stop()
+        
         # Apply premium range filters
         def apply_premium_filter(premium, range_selection):
             if range_selection == "All Premiums (No Filter)":
@@ -603,106 +607,141 @@ if run_scan:
         
         st.success(f"Found {len(filtered_trades)} trades matching criteria (Premium: {premium_range}, DTE: {dte_filter})")
         
-        if "Comprehensive" in scan_type:
-            create_enhanced_dashboard(filtered_trades)
+        if not filtered_trades:
+            st.warning("No trades match your current filters. Try adjusting the premium range or include selling activity.")
+            st.info("💡 **Tip:** Try 'All Premiums (No Filter)' and 'All DTE' to see all available data.")
+        else:
+            # Always show a quick preview table first
+            st.markdown("### 📋 Quick Preview (Top 10 by Premium)")
+            preview_data = []
+            for trade in sorted(filtered_trades, key=lambda x: x.get('premium', 0), reverse=True)[:10]:
+                preview_data.append({
+                    'Ticker': trade['ticker'],
+                    'Type': trade['type'], 
+                    'Strike': f"${trade['strike']:.0f}",
+                    'DTE': trade['dte'],
+                    'Premium': f"${trade['premium']:,.0f}",
+                    'Side': trade.get('order_side', 'Unknown'),
+                    'Volume': trade['volume'],
+                    'Scenarios': ", ".join(trade.get('scenarios', [])[:2]),
+                    'Time': trade['time_ny']
+                })
             
-            # Additional detailed tables
-            st.markdown("### 📋 Detailed Trade Analysis")
+            if preview_data:
+                st.dataframe(pd.DataFrame(preview_data), use_container_width=True)
             
-            tabs = st.tabs(["🟢 Call Activity", "🔴 Put Activity", "💎 High Premium", "⚡ High Volume"])
+            # Now show the selected analysis type
+            if "Comprehensive" in scan_type:
+                create_enhanced_dashboard(filtered_trades)
+                
+                # Additional detailed tables
+                st.markdown("### 📋 Detailed Trade Analysis")
+                
+                tabs = st.tabs(["🟢 Call Activity", "🔴 Put Activity", "💎 High Premium", "⚡ High Volume"])
+                
+                with tabs[0]:
+                    call_trades = [t for t in filtered_trades if t['type'] == 'C']
+                    if call_trades:
+                        call_df = pd.DataFrame([{
+                            'Ticker': t['ticker'], 'Strike': t['strike'], 'Expiry': t['expiry'],
+                            'DTE': t['dte'], 'Premium': f"${t['premium']:,}", 'Side': t.get('order_side', 'Unknown'),
+                            'Scenarios': ", ".join(t['scenarios'][:2]), 'Time': t['time_ny']
+                        } for t in sorted(call_trades, key=lambda x: x['premium'], reverse=True)[:20]])
+                        st.dataframe(call_df, use_container_width=True)
+                    else:
+                        st.info("No call trades found with current filters")
+                
+                with tabs[1]:
+                    put_trades = [t for t in filtered_trades if t['type'] == 'P']
+                    if put_trades:
+                        put_df = pd.DataFrame([{
+                            'Ticker': t['ticker'], 'Strike': t['strike'], 'Expiry': t['expiry'],
+                            'DTE': t['dte'], 'Premium': f"${t['premium']:,}", 'Side': t.get('order_side', 'Unknown'),
+                            'Scenarios': ", ".join(t['scenarios'][:2]), 'Time': t['time_ny']
+                        } for t in sorted(put_trades, key=lambda x: x['premium'], reverse=True)[:20]])
+                        st.dataframe(put_df, use_container_width=True)
+                    else:
+                        st.info("No put trades found with current filters")
+                
+                with tabs[2]:
+                    high_premium = sorted(filtered_trades, key=lambda x: x['premium'], reverse=True)[:15]
+                    if high_premium:
+                        hp_df = pd.DataFrame([{
+                            'Ticker': t['ticker'], 'Type': t['type'], 'Strike': t['strike'],
+                            'Premium': f"${t['premium']:,}", 'Side': t.get('order_side', 'Unknown'),
+                            'Strategy': ", ".join(t['scenarios'][:2])
+                        } for t in high_premium])
+                        st.dataframe(hp_df, use_container_width=True)
+                    else:
+                        st.info("No high premium trades found")
+                
+                with tabs[3]:
+                    high_volume = sorted(filtered_trades, key=lambda x: x['volume'], reverse=True)[:15]
+                    if high_volume:
+                        hv_df = pd.DataFrame([{
+                            'Ticker': t['ticker'], 'Type': t['type'], 'Volume': t['volume'],
+                            'Premium': f"${t['premium']:,}", 'Vol/OI': f"{t['vol_oi_ratio']:.1f}",
+                            'Strategy': ", ".join(t['scenarios'][:2])
+                        } for t in high_volume])
+                        st.dataframe(hv_df, use_container_width=True)
+                    else:
+                        st.info("No high volume trades found")
             
-            with tabs[0]:
-                call_trades = [t for t in filtered_trades if t['type'] == 'C']
-                if call_trades:
-                    call_df = pd.DataFrame([{
-                        'Ticker': t['ticker'], 'Strike': t['strike'], 'Expiry': t['expiry'],
-                        'DTE': t['dte'], 'Premium': f"${t['premium']:,}", 'Side': t.get('order_side', 'Unknown'),
-                        'Scenarios': ", ".join(t['scenarios'][:2]), 'Time': t['time_ny']
-                    } for t in sorted(call_trades, key=lambda x: x['premium'], reverse=True)[:20]])
-                    st.dataframe(call_df, use_container_width=True)
+            elif "Selling" in scan_type:
+                display_selling_analysis(filtered_trades)
             
-            with tabs[1]:
-                put_trades = [t for t in filtered_trades if t['type'] == 'P']
-                if put_trades:
-                    put_df = pd.DataFrame([{
-                        'Ticker': t['ticker'], 'Strike': t['strike'], 'Expiry': t['expiry'],
-                        'DTE': t['dte'], 'Premium': f"${t['premium']:,}", 'Side': t.get('order_side', 'Unknown'),
-                        'Scenarios': ", ".join(t['scenarios'][:2]), 'Time': t['time_ny']
-                    } for t in sorted(put_trades, key=lambda x: x['premium'], reverse=True)[:20]])
-                    st.dataframe(put_df, use_container_width=True)
+            elif "Alerts" in scan_type:
+                alerts = generate_enhanced_alerts(filtered_trades)
+                if alerts:
+                    st.markdown("### 🚨 Enhanced Alert System")
+                    for i, alert in enumerate(alerts[:15], 1):
+                        alert_type = alert.get('alert_type', 'INFO')
+                        icon = "🔥" if alert_type == "CRITICAL" else "⚠️" if alert_type == "HIGH" else "💰" if alert_type == "SELL_ALERT" else "ℹ️"
+                        
+                        with st.container():
+                            col1, col2 = st.columns([4, 1])
+                            with col1:
+                                st.markdown(f"**{icon} {i}. {alert['ticker']} ${alert['strike']:.0f}{alert['type']} "
+                                          f"{alert['expiry']} ({alert['dte']}d)**")
+                                st.write(f"💰 Premium: ${alert['premium']:,.0f} | Side: {alert.get('order_side', 'Unknown')} | "
+                                       f"Vol: {alert['volume']} | {alert.get('moneyness', 'N/A')}")
+                                st.write(f"🎯 Strategies: {', '.join(alert.get('scenarios', [])[:3])}")
+                                st.write(f"📍 Alert Reasons: {', '.join(alert.get('reasons', []))}")
+                            with col2:
+                                st.metric("Alert Score", alert.get('alert_score', 0))
+                                st.write(f"**{alert_type}**")
+                            st.divider()
+                else:
+                    st.info("No alerts triggered with current criteria")
             
-            with tabs[2]:
-                high_premium = sorted(filtered_trades, key=lambda x: x['premium'], reverse=True)[:15]
-                if high_premium:
-                    hp_df = pd.DataFrame([{
-                        'Ticker': t['ticker'], 'Type': t['type'], 'Strike': t['strike'],
-                        'Premium': f"${t['premium']:,}", 'Side': t.get('order_side', 'Unknown'),
-                        'Strategy': ", ".join(t['scenarios'][:2])
-                    } for t in high_premium])
-                    st.dataframe(hp_df, use_container_width=True)
-            
-            with tabs[3]:
-                high_volume = sorted(filtered_trades, key=lambda x: x['volume'], reverse=True)[:15]
-                if high_volume:
-                    hv_df = pd.DataFrame([{
-                        'Ticker': t['ticker'], 'Type': t['type'], 'Volume': t['volume'],
-                        'Premium': f"${t['premium']:,}", 'Vol/OI': f"{t['vol_oi_ratio']:.1f}",
-                        'Strategy': ", ".join(t['scenarios'][:2])
-                    } for t in high_volume])
-                    st.dataframe(hv_df, use_container_width=True)
-        
-        elif "Selling" in scan_type:
-            display_selling_analysis(filtered_trades)
-        
-        elif "Alerts" in scan_type:
-            alerts = generate_enhanced_alerts(filtered_trades)
-            if alerts:
-                st.markdown("### 🚨 Enhanced Alert System")
-                for i, alert in enumerate(alerts[:15], 1):
-                    alert_type = alert.get('alert_type', 'INFO')
-                    icon = "🔥" if alert_type == "CRITICAL" else "⚠️" if alert_type == "HIGH" else "💰" if alert_type == "SELL_ALERT" else "ℹ️"
+            # Export functionality - always show when there are trades
+            with st.expander("💾 Export Enhanced Data", expanded=False):
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                
+                if filtered_trades:
+                    # Enhanced CSV export
+                    csv_data = []
+                    for trade in filtered_trades:
+                        row = trade.copy()
+                        row['scenarios'] = ', '.join(row.get('scenarios', []))
+                        row['reasons'] = ', '.join(row.get('reasons', [])) if 'reasons' in row else ''
+                        csv_data.append(row)
                     
-                    with st.container():
-                        col1, col2 = st.columns([4, 1])
-                        with col1:
-                            st.markdown(f"**{icon} {i}. {alert['ticker']} ${alert['strike']:.0f}{alert['type']} "
-                                      f"{alert['expiry']} ({alert['dte']}d)**")
-                            st.write(f"💰 Premium: ${alert['premium']:,.0f} | Side: {alert.get('order_side', 'Unknown')} | "
-                                   f"Vol: {alert['volume']} | {alert.get('moneyness', 'N/A')}")
-                            st.write(f"🎯 Strategies: {', '.join(alert.get('scenarios', [])[:3])}")
-                            st.write(f"📍 Alert Reasons: {', '.join(alert.get('reasons', []))}")
-                        with col2:
-                            st.metric("Alert Score", alert.get('alert_score', 0))
-                            st.write(f"**{alert_type}**")
-                        st.divider()
-            else:
-                st.info("No alerts triggered with current criteria")
-        
-        # Export functionality
-        with st.expander("💾 Export Enhanced Data", expanded=False):
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            
-            if filtered_trades:
-                # Enhanced CSV export
-                csv_data = []
-                for trade in filtered_trades:
-                    row = trade.copy()
-                    row['scenarios'] = ', '.join(row.get('scenarios', []))
-                    row['reasons'] = ', '.join(row.get('reasons', [])) if 'reasons' in row else ''
-                    csv_data.append(row)
-                
-                df = pd.DataFrame(csv_data)
-                csv = df.to_csv(index=False)
-                
-                st.download_button(
-                    label=f"📥 Download Enhanced Flow Data ({len(filtered_trades)} trades)",
-                    data=csv,
-                    file_name=f"enhanced_options_flow_{timestamp}.csv",
-                    mime="text/csv",
-                    use_container_width=True
-                )
-            else:
-                st.warning("No data to export")
+                    df = pd.DataFrame(csv_data)
+                    csv = df.to_csv(index=False)
+                    
+                    st.download_button(
+                        label=f"📥 Download Enhanced Flow Data ({len(filtered_trades)} trades)",
+                        data=csv,
+                        file_name=f"enhanced_options_flow_{timestamp}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+                    
+                    # Show column info
+                    st.info(f"CSV contains {len(df.columns)} columns: {', '.join(df.columns[:10])}...")
+                else:
+                    st.warning("No data to export")
 
 else:
     st.markdown("""
