@@ -481,10 +481,12 @@ def display_selling_analysis(trades):
         sell_df_data.append({
             'Ticker': trade['ticker'],
             'Type': trade['type'],
-            'Strike': trade['strike'],
+            'Strike': f"${trade['strike']:.0f}",
+            'Price': f"${trade['price']:.2f}" if trade['price'] != 'N/A' and trade['price'] > 0 else 'N/A',
             'Expiry': trade['expiry'],
             'DTE': trade['dte'],
             'Premium': f"${trade['premium']:,}",
+            'Volume': trade['volume'],
             'Strategy': ", ".join(trade['scenarios'][:2]),
             'Moneyness': trade.get('moneyness', 'Unknown'),
             'Time': trade['time_ny']
@@ -619,6 +621,7 @@ if run_scan:
                     'Ticker': trade['ticker'],
                     'Type': trade['type'], 
                     'Strike': f"${trade['strike']:.0f}",
+                    'Price': f"${trade['price']:.2f}" if trade['price'] != 'N/A' and trade['price'] > 0 else 'N/A',
                     'DTE': trade['dte'],
                     'Premium': f"${trade['premium']:,.0f}",
                     'Side': trade.get('order_side', 'Unknown'),
@@ -643,9 +646,16 @@ if run_scan:
                     call_trades = [t for t in filtered_trades if t['type'] == 'C']
                     if call_trades:
                         call_df = pd.DataFrame([{
-                            'Ticker': t['ticker'], 'Strike': t['strike'], 'Expiry': t['expiry'],
-                            'DTE': t['dte'], 'Premium': f"${t['premium']:,}", 'Side': t.get('order_side', 'Unknown'),
-                            'Scenarios': ", ".join(t['scenarios'][:2]), 'Time': t['time_ny']
+                            'Ticker': t['ticker'], 
+                            'Strike': f"${t['strike']:.0f}", 
+                            'Price': f"${t['price']:.2f}" if t['price'] != 'N/A' and t['price'] > 0 else 'N/A',
+                            'Expiry': t['expiry'],
+                            'DTE': t['dte'], 
+                            'Premium': f"${t['premium']:,}", 
+                            'Side': t.get('order_side', 'Unknown'),
+                            'Volume': t['volume'],
+                            'Scenarios': ", ".join(t['scenarios'][:2]), 
+                            'Time': t['time_ny']
                         } for t in sorted(call_trades, key=lambda x: x['premium'], reverse=True)[:20]])
                         st.dataframe(call_df, use_container_width=True)
                     else:
@@ -655,9 +665,16 @@ if run_scan:
                     put_trades = [t for t in filtered_trades if t['type'] == 'P']
                     if put_trades:
                         put_df = pd.DataFrame([{
-                            'Ticker': t['ticker'], 'Strike': t['strike'], 'Expiry': t['expiry'],
-                            'DTE': t['dte'], 'Premium': f"${t['premium']:,}", 'Side': t.get('order_side', 'Unknown'),
-                            'Scenarios': ", ".join(t['scenarios'][:2]), 'Time': t['time_ny']
+                            'Ticker': t['ticker'], 
+                            'Strike': f"${t['strike']:.0f}", 
+                            'Price': f"${t['price']:.2f}" if t['price'] != 'N/A' and t['price'] > 0 else 'N/A',
+                            'Expiry': t['expiry'],
+                            'DTE': t['dte'], 
+                            'Premium': f"${t['premium']:,}", 
+                            'Side': t.get('order_side', 'Unknown'),
+                            'Volume': t['volume'],
+                            'Scenarios': ", ".join(t['scenarios'][:2]), 
+                            'Time': t['time_ny']
                         } for t in sorted(put_trades, key=lambda x: x['premium'], reverse=True)[:20]])
                         st.dataframe(put_df, use_container_width=True)
                     else:
@@ -667,8 +684,13 @@ if run_scan:
                     high_premium = sorted(filtered_trades, key=lambda x: x['premium'], reverse=True)[:15]
                     if high_premium:
                         hp_df = pd.DataFrame([{
-                            'Ticker': t['ticker'], 'Type': t['type'], 'Strike': t['strike'],
-                            'Premium': f"${t['premium']:,}", 'Side': t.get('order_side', 'Unknown'),
+                            'Ticker': t['ticker'], 
+                            'Type': t['type'], 
+                            'Strike': f"${t['strike']:.0f}",
+                            'Price': f"${t['price']:.2f}" if t['price'] != 'N/A' and t['price'] > 0 else 'N/A',
+                            'Premium': f"${t['premium']:,}", 
+                            'Side': t.get('order_side', 'Unknown'),
+                            'Volume': t['volume'],
                             'Strategy': ", ".join(t['scenarios'][:2])
                         } for t in high_premium])
                         st.dataframe(hp_df, use_container_width=True)
@@ -679,8 +701,12 @@ if run_scan:
                     high_volume = sorted(filtered_trades, key=lambda x: x['volume'], reverse=True)[:15]
                     if high_volume:
                         hv_df = pd.DataFrame([{
-                            'Ticker': t['ticker'], 'Type': t['type'], 'Volume': t['volume'],
-                            'Premium': f"${t['premium']:,}", 'Vol/OI': f"{t['vol_oi_ratio']:.1f}",
+                            'Ticker': t['ticker'], 
+                            'Type': t['type'], 
+                            'Price': f"${t['price']:.2f}" if t['price'] != 'N/A' and t['price'] > 0 else 'N/A',
+                            'Volume': t['volume'],
+                            'Premium': f"${t['premium']:,}", 
+                            'Vol/OI': f"{t['vol_oi_ratio']:.1f}",
                             'Strategy': ", ".join(t['scenarios'][:2])
                         } for t in high_volume])
                         st.dataframe(hv_df, use_container_width=True)
@@ -703,7 +729,7 @@ if run_scan:
                             with col1:
                                 st.markdown(f"**{icon} {i}. {alert['ticker']} ${alert['strike']:.0f}{alert['type']} "
                                           f"{alert['expiry']} ({alert['dte']}d)**")
-                                st.write(f"💰 Premium: ${alert['premium']:,.0f} | Side: {alert.get('order_side', 'Unknown')} | "
+                                st.write(f"💰 Premium: ${alert['premium']:,.0f} | Price: ${alert['price']:.2f} | Side: {alert.get('order_side', 'Unknown')} | "
                                        f"Vol: {alert['volume']} | {alert.get('moneyness', 'N/A')}")
                                 st.write(f"🎯 Strategies: {', '.join(alert.get('scenarios', [])[:3])}")
                                 st.write(f"📍 Alert Reasons: {', '.join(alert.get('reasons', []))}")
