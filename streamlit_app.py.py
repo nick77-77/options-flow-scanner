@@ -271,14 +271,80 @@ def calculate_iv_metrics(trades):
     }
 
 def display_iv_analysis(trades):
-    """Comprehensive IV analysis section"""
+    """Comprehensive IV analysis section with fallback for missing IV data"""
     st.markdown("### 📊 Implied Volatility Analysis")
     
-    iv_metrics = calculate_iv_metrics(trades)
+    # First, let's check what IV data we actually have
+    iv_trades = [t for t in trades if t.get('iv', 0) > 0]
+    estimated_iv_trades = [t for t in trades if t.get('iv', 0) > 0 and t.get('iv', 0) < 10]  # Reasonable IV range
     
-    if not iv_metrics:
-        st.warning("No IV data available for current trades")
+    if not iv_trades:
+        st.warning("⚠️ No IV data found in current dataset")
+        st.info("""
+        **Possible reasons for missing IV data:**
+        - API doesn't include IV in this endpoint
+        - IV data might be in a different field name
+        - Data source limitations
+        
+        **Alternative Analysis:**
+        We can analyze volatility patterns using price movements and option premiums.
+        """)
+        
+        # Alternative volatility analysis without IV
+        st.markdown("#### 📈 Alternative Volatility Analysis")
+        
+        # Analyze by premium levels as proxy for volatility
+        high_premium_trades = [t for t in trades if t.get('premium', 0) > 100000]
+        medium_premium_trades = [t for t in trades if 50000 <= t.get('premium', 0) <= 100000]
+        low_premium_trades = [t for t in trades if t.get('premium', 0) < 50000]
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("High Premium Trades", len(high_premium_trades), "Likely High Vol")
+        with col2:
+            st.metric("Medium Premium Trades", len(medium_premium_trades), "Moderate Vol")
+        with col3:
+            st.metric("Low Premium Trades", len(low_premium_trades), "Lower Vol")
+        
+        # Premium distribution chart
+        premium_dist = pd.DataFrame({
+            'Premium Level': ['High (>$100K)', 'Medium ($50K-$100K)', 'Low (<$50K)'],
+            'Count': [len(high_premium_trades), len(medium_premium_trades), len(low_premium_trades)]
+        })
+        
+        if premium_dist['Count'].sum() > 0:
+            fig = px.pie(premium_dist, values='Count', names='Premium Level',
+                        title="Premium Distribution (Volatility Proxy)")
+            st.plotly_chart(fig, use_container_width=True)
+        
+        # Show high premium trades as volatility proxy
+        st.markdown("#### 🔥 High Premium Trades (Volatility Proxy)")
+        if high_premium_trades:
+            high_premium_data = []
+            for trade in sorted(high_premium_trades, key=lambda x: x.get('premium', 0), reverse=True)[:10]:
+                # Calculate rough volatility indicators
+                vol_indicator = "Very High" if trade.get('premium', 0) > 200000 else "High"
+                
+                high_premium_data.append({
+                    'Ticker': trade['ticker'],
+                    'Type': trade['type'],
+                    'Strike': f"${trade['strike']:.0f}",
+                    'Premium': f"${trade['premium']:,.0f}",
+                    'Vol Indicator': vol_indicator,
+                    'DTE': trade['dte'],
+                    'Volume': trade['volume'],
+                    'Strategy': ", ".join(trade.get('scenarios', [])[:2]),
+                    'Time': trade['time_ny']
+                })
+            
+            st.dataframe(pd.DataFrame(high_premium_data), use_container_width=True)
+        else:
+            st.info("No high premium trades found")
+        
         return
+    
+    # If we have IV data, proceed with full analysis
+    iv_metrics = calculate_iv_metrics(trades)
     
     # IV Overview Metrics
     col1, col2, col3, col4 = st.columns(4)
@@ -568,13 +634,35 @@ def fetch_enhanced_flow():
                 bid = float(trade.get('bid', 0)) if trade.get('bid') not in ['N/A', '', None] else 0
                 ask = float(trade.get('ask', 0)) if trade.get('ask') not in ['N/A', '', None] else 0
                 
-                # IV data extraction
-                iv = float(trade.get('iv', 0)) if trade.get('iv') not in ['N/A', '', None] else 0
-                # Alternative IV field names to check
+                # IV data extraction - check multiple possible field names
+                iv = 0
+                iv_fields = ['iv', 'implied_volatility', 'volatility', 'impliedVolatility', 'vol', 'IV', 'ivol']
+                for field in iv_fields:
+                    if field in trade and trade[field] not in ['N/A', '', None, 0]:
+                        try:
+                            iv = float(trade[field])
+                            if iv > 0:
+                                break
+                        except (ValueError, TypeError):
+                            continue
+                
+                # If no IV found, try to estimate from bid-ask spread and other factors
                 if iv == 0:
-                    iv = float(trade.get('implied_volatility', 0)) if trade.get('implied_volatility') not in ['N/A', '', None] else 0
-                if iv == 0:
-                    iv = float(trade.get('volatility', 0)) if trade.get('volatility') not in ['N/A', '', None] else 0
+                    try:
+                        # Simple IV estimation based on option price and moneyness
+                        option_price = price if price > 0 else mid_price
+                        if option_price > 0 and underlying_price > 0 and dte > 0:
+                            # Very rough IV estimation (not precise, but gives some indication)
+                            moneyness = abs(strike - underlying_price) / underlying_price
+                            time_factor = np.sqrt(dte / 365.0)
+                            if time_factor > 0:
+                                # Rough approximation: IV ≈ option_price / (underlying_price * time_factor)
+                                estimated_iv = (option_price / underlying_price) / time_factor
+                                # Cap at reasonable levels
+                                if 0.01 <= estimated_iv <= 3.0:
+                                    iv = estimated_iv
+                    except (ValueError, TypeError, ZeroDivisionError):
+                        pass
                     
             except (ValueError, TypeError):
                 continue  # Skip trades with invalid numeric data
