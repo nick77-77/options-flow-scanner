@@ -48,28 +48,37 @@ def parse_option_chain(opt_str):
 
 def detect_order_side(trade):
     """Enhanced order side detection"""
-    # Check for selling indicators
-    ask_side_indicators = [
-        trade.get('price', 0) >= trade.get('mid_price', 0),
-        trade.get('description', '').lower().find('ask') != -1,
-        trade.get('side', '').upper() == 'ASK'
-    ]
-    
-    bid_side_indicators = [
-        trade.get('price', 0) <= trade.get('mid_price', 0),
-        trade.get('description', '').lower().find('bid') != -1,
-        trade.get('side', '').upper() == 'BID'
-    ]
-    
-    # Analyze order flow patterns
-    if sum(ask_side_indicators) > sum(bid_side_indicators):
-        return "SELL_TO_OPEN" if trade.get('volume', 0) > trade.get('open_interest', 1) else "SELL_TO_CLOSE"
-    elif sum(bid_side_indicators) > sum(ask_side_indicators):
-        return "BUY_TO_OPEN" if trade.get('volume', 0) > trade.get('open_interest', 1) else "BUY_TO_CLOSE"
-    else:
-        # Fallback to volume/OI analysis
-        vol_oi_ratio = trade.get('volume', 0) / max(trade.get('open_interest', 1), 1)
-        return "BUY_TO_OPEN" if vol_oi_ratio > 1.5 else "MIXED"
+    try:
+        # Safely convert values to float, default to 0 if conversion fails
+        price = float(trade.get('price', 0)) if trade.get('price') not in ['N/A', '', None] else 0
+        mid_price = float(trade.get('mid_price', 0)) if trade.get('mid_price') not in ['N/A', '', None] else 0
+        volume = int(trade.get('volume', 0)) if trade.get('volume') not in ['N/A', '', None] else 0
+        oi = int(trade.get('open_interest', 1)) if trade.get('open_interest') not in ['N/A', '', None] else 1
+        
+        # Check for selling indicators
+        ask_side_indicators = [
+            price >= mid_price if mid_price > 0 else False,
+            'ask' in trade.get('description', '').lower(),
+            trade.get('side', '').upper() == 'ASK'
+        ]
+        
+        bid_side_indicators = [
+            price <= mid_price if mid_price > 0 else False,
+            'bid' in trade.get('description', '').lower(),
+            trade.get('side', '').upper() == 'BID'
+        ]
+        
+        # Analyze order flow patterns
+        if sum(ask_side_indicators) > sum(bid_side_indicators):
+            return "SELL_TO_OPEN" if volume > oi else "SELL_TO_CLOSE"
+        elif sum(bid_side_indicators) > sum(ask_side_indicators):
+            return "BUY_TO_OPEN" if volume > oi else "BUY_TO_CLOSE"
+        else:
+            # Fallback to volume/OI analysis
+            vol_oi_ratio = volume / max(oi, 1)
+            return "BUY_TO_OPEN" if vol_oi_ratio > 1.5 else "MIXED"
+    except (ValueError, TypeError, AttributeError):
+        return "UNKNOWN"
 
 def detect_advanced_scenarios(trade, underlying_price=None, market_context=None):
     """Enhanced scenario detection with selling patterns"""
@@ -286,7 +295,7 @@ def fetch_enhanced_flow():
                 continue
 
             # Enhanced time parsing
-            utc_time_str = trade.get('created_at')
+            utc_time_str = trade.get('created_at', 'N/A')
             ny_time_str = "N/A"
             if utc_time_str and utc_time_str != "N/A":
                 try:
@@ -296,6 +305,19 @@ def fetch_enhanced_flow():
                 except Exception:
                     ny_time_str = "N/A"
 
+            # Safe numeric conversions
+            try:
+                premium = float(trade.get('total_premium', 0))
+                volume = int(trade.get('volume', 0))
+                oi = int(trade.get('open_interest', 0))
+                underlying_price = float(trade.get('underlying_price', strike)) if trade.get('underlying_price') not in ['N/A', '', None] else strike
+                price = float(trade.get('price', 0)) if trade.get('price') not in ['N/A', '', None] else 0
+                mid_price = float(trade.get('mid_price', 0)) if trade.get('mid_price') not in ['N/A', '', None] else 0
+                bid = float(trade.get('bid', 0)) if trade.get('bid') not in ['N/A', '', None] else 0
+                ask = float(trade.get('ask', 0)) if trade.get('ask') not in ['N/A', '', None] else 0
+            except (ValueError, TypeError):
+                continue  # Skip trades with invalid numeric data
+
             trade_data = {
                 'ticker': ticker,
                 'option': option_chain,
@@ -303,19 +325,19 @@ def fetch_enhanced_flow():
                 'strike': strike,
                 'expiry': expiry,
                 'dte': dte,
-                'price': trade.get('price', 'N/A'),
+                'price': price,
                 'premium': premium,
-                'volume': trade.get('volume', 0),
-                'oi': trade.get('open_interest', 0),
+                'volume': volume,
+                'oi': oi,
                 'time_utc': utc_time_str,
                 'time_ny': ny_time_str,
                 'rule_name': trade.get('rule_name', ''),
                 'description': trade.get('description', ''),
-                'underlying_price': trade.get('underlying_price', strike),
-                'mid_price': trade.get('mid_price', 0),
-                'bid': trade.get('bid', 0),
-                'ask': trade.get('ask', 0),
-                'vol_oi_ratio': trade.get('volume', 0) / max(trade.get('open_interest', 1), 1),
+                'underlying_price': underlying_price,
+                'mid_price': mid_price,
+                'bid': bid,
+                'ask': ask,
+                'vol_oi_ratio': volume / max(oi, 1),
                 'side': trade.get('side', ''),
             }
             
@@ -332,10 +354,10 @@ def fetch_enhanced_flow():
                 trade['scenarios'] = scenarios
                 
                 # Enhanced moneyness calculation
-                if trade['underlying_price'] and trade['underlying_price'] != 'N/A':
+                if trade['underlying_price'] and trade['underlying_price'] > 0:
                     try:
                         underlying = float(trade['underlying_price'])
-                        strike = trade['strike']
+                        strike = float(trade['strike'])
                         pct_diff = ((strike - underlying) / underlying) * 100
                         
                         if abs(pct_diff) < 2:
@@ -344,7 +366,7 @@ def fetch_enhanced_flow():
                             trade['moneyness'] = f"OTM +{pct_diff:.1f}%"
                         else:
                             trade['moneyness'] = f"ITM {pct_diff:.1f}%"
-                    except:
+                    except (ValueError, TypeError, ZeroDivisionError):
                         trade['moneyness'] = "Unknown"
                 else:
                     trade['moneyness'] = "Unknown"
@@ -507,12 +529,21 @@ if run_scan:
     with st.spinner(f"Running {scan_type}..."):
         trades = fetch_enhanced_flow()
         
-        # Apply filters
+        # Apply filters with safe comparisons
         filtered_trades = []
         for trade in trades:
-            if trade['premium'] >= min_premium and trade['dte'] <= max_dte:
-                if include_selling or 'BUY' in trade.get('order_side', ''):
-                    filtered_trades.append(trade)
+            try:
+                # Safe numeric conversions for filtering
+                trade_premium = float(trade.get('premium', 0))
+                trade_dte = int(trade.get('dte', 0))
+                trade_order_side = str(trade.get('order_side', ''))
+                
+                # Apply filters
+                if trade_premium >= min_premium and trade_dte <= max_dte:
+                    if include_selling or 'BUY' in trade_order_side:
+                        filtered_trades.append(trade)
+            except (ValueError, TypeError):
+                continue  # Skip trades with invalid data
         
         st.success(f"Found {len(filtered_trades)} trades matching criteria")
         
