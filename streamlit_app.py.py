@@ -12,7 +12,6 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import numpy as np
 from zoneinfo import ZoneInfo
-import streamlit.components.v1 as components  # For embedding HTML
 
 # --- CONFIGURATION ---
 class Config:
@@ -32,8 +31,8 @@ class Config:
 
 config = Config()
 
-
 # --- HELPER FUNCTIONS ---
+
 def parse_option_chain(opt_str):
     try:
         ticker = ''.join([c for c in opt_str if c.isalpha()])[:-1]
@@ -62,6 +61,19 @@ def calculate_moneyness(strike, current_price):
             return f"ITM {diff_percent:.1f}%"
     except:
         return "Unknown"
+
+
+def get_time_to_expiry_category(dte):
+    if dte <= 1:
+        return "0DTE"
+    elif dte <= 7:
+        return "Weekly"
+    elif dte <= 30:
+        return "Monthly"
+    elif dte <= 90:
+        return "Quarterly"
+    else:
+        return "LEAPS"
 
 
 def detect_scenarios(trade, underlying_price=None):
@@ -188,6 +200,26 @@ def calculate_iv_metrics(trades):
     }
 
 
+def calculate_sentiment_score(trades):
+    call_premium = sum(t['premium'] for t in trades if t['type'] == 'C')
+    put_premium = sum(t['premium'] for t in trades if t['type'] == 'P')
+    total = call_premium + put_premium
+    if total == 0:
+        return 0, "Neutral"
+    call_ratio = call_premium / total
+    if call_ratio > 0.7:
+        return call_ratio, "Very Bullish"
+    elif call_ratio > 0.6:
+        return call_ratio, "Bullish"
+    elif call_ratio > 0.4:
+        return call_ratio, "Neutral"
+    elif call_ratio > 0.3:
+        return call_ratio, "Bearish"
+    else:
+        return call_ratio, "Very Bearish"
+
+
+# --- FILTERING FUNCTIONS ---
 def apply_filters(trades, premium_range, dte_filter, iv_filter="All IV Levels"):
     filtered = trades.copy()
     # Apply Premium Range Filter
@@ -232,6 +264,7 @@ def apply_filters(trades, premium_range, dte_filter, iv_filter="All IV Levels"):
     return filtered
 
 
+# --- FETCH FUNCTION ---
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def fetch_general_flow():
     headers = {
@@ -277,6 +310,7 @@ def fetch_general_flow():
                 except Exception:
                     pass
 
+            # Extract IV
             iv = 0
             iv_fields = ['implied_volatility', 'volatility', 'impliedVolatility', 'vol', 'IV', 'iv']
             for field in iv_fields:
@@ -312,6 +346,7 @@ def fetch_general_flow():
 
             ticker_data[ticker].append(trade_data)
 
+        # Detect Scenarios
         for ticker, trade_list in ticker_data.items():
             atm_calls = [t['strike'] for t in trade_list if t['type'] == 'C']
             avg_underlying_price = sum(atm_calls) / len(atm_calls) if atm_calls else None
@@ -405,6 +440,7 @@ def display_iv_analysis(trades):
         return
 
     iv_metrics = calculate_iv_metrics(trades)
+
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Average IV", f"{iv_metrics['avg_iv']:.1%}")
@@ -436,6 +472,7 @@ def display_iv_analysis(trades):
                          'Extreme (>50%)': '#8B0000'
                      })
         st.plotly_chart(fig, use_container_width=True)
+
     with col2:
         premium_dist_data = pd.DataFrame({
             'IV Category': ['Low (≤20%)', 'Medium (20-40%)', 'High (>40%)', 'Extreme (>50%)'],
@@ -447,15 +484,57 @@ def display_iv_analysis(trades):
             ]
         })
         fig = px.bar(premium_dist_data, x='IV Category', y='Premium', title="Premium Distribution by IV Level",
-                      color='IV Category',
-                      color_discrete_map={
-                          'Low (≤20%)': '#90EE90',
-                          'Medium (20-40%)': '#FFD700',
-                          'High (>40%)': '#FF6B6B',
-                          'Extreme (>50%)': '#8B0000'
-                      })
+                     color='IV Category',
+                     color_discrete_map={
+                         'Low (≤20%)': '#90EE90',
+                         'Medium (20-40%)': '#FFD700',
+                         'High (>40%)': '#FF6B6B',
+                         'Extreme (>50%)': '#8B0000'
+                     })
         fig.update_layout(yaxis_tickformat='$,.0f')
         st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("#### 🔥 High IV Opportunities")
+    high_iv_trades = [t for t in trades if t.get('iv', 0) > config.HIGH_IV_THRESHOLD]
+    if high_iv_trades:
+        high_iv_data = []
+        for trade in sorted(high_iv_trades, key=lambda x: x.get('iv', 0), reverse=True)[:15]:
+            high_iv_data.append({
+                'Ticker': trade['ticker'],
+                'Type': trade['type'],
+                'Strike': f"${trade['strike']:.0f}",
+                'IV': trade['iv_percentage'],
+                'DTE': trade['dte'],
+                'Premium': f"${trade['premium']:,.0f}",
+                'Volume': trade['volume'],
+                'Strategy': ", ".join(trade.get('scenarios', [])[:2]),
+                'Time': trade['time_ny']
+            })
+        st.dataframe(pd.DataFrame(high_iv_data), use_container_width=True)
+    else:
+        st.info("No high IV trades found in current dataset")
+
+    st.markdown("#### ⚡ IV Crush Risk Analysis")
+    iv_crush_candidates = [t for t in trades if t.get('iv', 0) > config.IV_CRUSH_THRESHOLD and t.get('dte', 0) <= 7]
+    if iv_crush_candidates:
+        iv_crush_data = []
+        for trade in sorted(iv_crush_candidates, key=lambda x: x.get('iv', 0), reverse=True)[:10]:
+            risk_level = "High" if trade.get('iv', 0) > 0.50 else "Medium"
+            iv_crush_data.append({
+                'Ticker': trade['ticker'],
+                'Type': trade['type'],
+                'Strike': f"${trade['strike']:.0f}",
+                'IV': trade['iv_percentage'],
+                'DTE': trade['dte'],
+                'Premium': f"${trade['premium']:,.0f}",
+                'Volume': trade['volume'],
+                'Risk Level': risk_level,
+                'Time': trade['time_ny']
+            })
+        st.dataframe(pd.DataFrame(iv_crush_data), use_container_width=True)
+        st.info("💡 These positions may lose value rapidly if volatility decreases after events")
+    else:
+        st.info("No IV crush candidates found")
 
 
 def display_alerts(trades):
@@ -504,294 +583,131 @@ def save_to_csv(trades, filename_prefix):
     )
 
 
-# --- EMBEDDED HTML DASHBOARD ---
-HTML_DASHBOARD = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Options Flow Tracker Dashboard</title>
-  <style>
-    body {
-      font-family: 'Inter', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-      background: #f9fafb;
-      margin: 0;
-      padding: 0 2rem 2rem;
-      color: #1f2937;
-      min-height: 100vh;
-    }
-    header {
-      background: #2563eb;
-      color: white;
-      padding: 1.6rem 2rem;
-      font-weight: 700;
-      font-size: 1.8rem;
-      text-align: center;
-      border-radius: 0 0 12px 12px;
-      margin-bottom: 2rem;
-      box-shadow: 0 4px 12px rgb(37 99 235 / 0.4);
-    }
-    main {
-      max-width: 1200px;
-      margin: 0 auto;
-    }
-    section {
-      background: white;
-      padding: 1.8rem 2rem;
-      border-radius: 12px;
-      box-shadow: 0 4px 15px rgba(0, 0, 0, 0.07);
-      margin-bottom: 2.5rem;
-    }
-    h2 {
-      margin-bottom: 1rem;
-      color: #1e40af;
-      border-bottom: 3px solid #3b82f6;
-      padding-bottom: 0.3rem;
-      font-weight: 700;
-      font-size: 1.6rem;
-    }
-    p {
-      line-height: 1.5;
-      font-size: 1rem;
-      color: #374151;
-      margin-bottom: 1rem;
-    }
-    ul {
-      padding-left: 1.2rem;
-      margin-bottom: 1rem;
-      color: #4b5563;
-    }
-    ul li {
-      margin-bottom: 0.5rem;
-    }
-    .grid-charts {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      gap: 1.5rem;
-      margin-top: 1rem;
-    }
-    .chart-box {
-      background: #e0e7ff;
-      border-radius: 10px;
-      height: 220px;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      color: #3730a3;
-      font-weight: 600;
-      font-size: 1.1rem;
-      user-select: none;
-      box-shadow: inset 0 0 12px rgba(59, 130, 246, 0.3);
-    }
-    button.cta-btn {
-      background-color: #2563eb;
-      color: white;
-      border: none;
-      padding: 0.8rem 1.8rem;
-      border-radius: 8px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: background-color 0.3s ease;
-      margin-top: 1rem;
-      display: inline-block;
-      text-align: center;
-    }
-    button.cta-btn:hover {
-      background-color: #1d4ed8;
-    }
-    @media (max-width: 480px) {
-      body {
-        padding: 1rem;
-      }
-      header {
-        font-size: 1.4rem;
-        padding: 1rem;
-      }
-      section {
-        padding: 1rem 1.2rem;
-      }
-    }
-  </style>
-</head>
-<body>
-
-  <header>Options Flow Tracker Dashboard</header>
-
-  <main>
-    <section>
-      <h2>Overview</h2>
-      <p>This Streamlit-based Options Flow Tracker app fetches, analyzes, and visualizes real-time unusual options trading activity from the Unusual Whales API.</p>
-      <p>It detects significant trades and analyzes them by premium size, time-to-expiration (DTE), and implied volatility (IV).</p>
-    </section>
-
-    <section>
-      <h2>Scan Types</h2>
-      <p>Our app supports multiple scan types to cover all angles of the options market:</p>
-      <ul>
-        <li>General flow analysis</li>
-        <li>DTE-segregated views</li>
-        <li>Implied Volatility (IV) analytics</li>
-        <li>Smart alert generation based on customized criteria</li>
-      </ul>
-      <button class="cta-btn" onclick="alert('Start scan clicked')">Start Scan</button>
-    </section>
-
-    <section>
-      <h2>Analytics & Trade Scenarios</h2>
-      <p>The app parses option chain data to calculate moneyness and detect trade scenarios like large OTM buying, sweeps, block trades, hedging, and volatility plays.</p>
-      <div class="grid-charts">
-        <div class="chart-box">Call/Put Ratio Pie Chart</div>
-        <div class="chart-box">Scenario Distribution Bar Graph</div>
-        <div class="chart-box">Implied Volatility Histogram</div>
-      </div>
-      <button class="cta-btn" onclick="alert('View analytics clicked')">View Analytics</button>
-    </section>
-
-    <section>
-      <h2>Filters & Customization</h2>
-      <p>Focus your analysis with powerful filters:</p>
-      <ul>
-        <li>Premium Range</li>
-        <li>Time-To-Expiration (DTE)</li>
-        <li>Implied Volatility (IV) Levels</li>
-      </ul>
-      <p>These filters help you zero in on high-impact trades.</p>
-      <button class="cta-btn" onclick="alert('Apply filters clicked')">Apply Filters</button>
-    </section>
-
-    <section>
-      <h2>Export Data</h2>
-      <p>Export your filtered results to CSV for further offline analysis and record-keeping.</p>
-      <button class="cta-btn" onclick="alert('Export to CSV clicked')">Export to CSV</button>
-    </section>
-  </main>
-
-</body>
-</html>
-"""
-
-
 # --- MAIN APP ---
 def main():
     st.set_page_config(page_title="Options Flow Tracker", page_icon="📊", layout="wide")
     st.title("📊 Comprehensive Options Flow Tracker")
     st.markdown("### Real-time unusual options activity analysis with enhanced IV pattern recognition")
 
-    view = st.selectbox("Select View", ["Dashboard View", "Advanced View"])
+    with st.sidebar:
+        st.markdown("## 🎛️ Control Panel")
+        scan_type = st.selectbox(
+            "Select Scan Type:",
+            [
+                "🔍 General Flow Scanner",
+                "⏰ DTE Segregated Flow",
+                "📊 IV Analysis",
+                "🚨 Alert Generator"
+            ]
+        )
+        premium_range = st.selectbox(
+            "Select Premium Range:",
+            [
+                "All Premiums (No Filter)",
+                "Under $100K",
+                "Under $250K",
+                "$100K - $250K",
+                "$250K - $500K",
+                "Above $250K",
+                "Above $500K",
+                "Above $1M"
+            ],
+            index=0
+        )
+        dte_filter = st.selectbox(
+            "Select DTE Range:",
+            [
+                "All DTE",
+                "0DTE Only",
+                "Weekly (≤7d)",
+                "Monthly (≤30d)",
+                "Quarterly (≤90d)",
+                "LEAPS (>90d)"
+            ],
+            index=0
+        )
+        iv_filter = st.selectbox(
+            "IV Range Filter:",
+            [
+                "All IV Levels",
+                "High IV Only (>30%)",
+                "Extreme IV Only (>50%)",
+                "Low IV Only (≤20%)"
+            ] if "IV Analysis" in scan_type else ["All IV Levels"],
+            disabled="IV Analysis" not in scan_type
+        )
+        show_iv_crush = st.checkbox("Show IV Crush Candidates", value=True, disabled="IV Analysis" not in scan_type)
+        show_volatility_plays = st.checkbox("Show Volatility Strategies", value=True, disabled="IV Analysis" not in scan_type)
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔥 High Premium", use_container_width=True):
+                premium_range = "Above $500K"
+        with col2:
+            if st.button("💎 Mega Trades", use_container_width=True):
+                premium_range = "Above $1M"
+        run_scan = st.button("🔄 Run Scan", type="primary", use_container_width=True)
 
-    if view == "Dashboard View":
-        st.markdown("### 🖥️ Modern Dashboard View")
-        components.html(HTML_DASHBOARD, height=1200, scrolling=True)
+    if run_scan:
+        with st.spinner(f"Running {scan_type}..."):
+            trades = fetch_general_flow()
+            filtered_trades = apply_filters(trades, premium_range, dte_filter, iv_filter)
+            original_count = len(trades)
+            filtered_count = len(filtered_trades)
+
+            if filtered_count == 0:
+                st.warning("⚠️ No trades match your filters. Try adjusting the criteria.")
+                st.info("💡 Tip: Start with no filters and gradually narrow down.")
+                return
+
+            st.info(f"**Filter Results:** {original_count} → {filtered_count} trades after applying filters")
+
+            if "General" in scan_type:
+                sentiment_ratio, sentiment_label = calculate_sentiment_score(filtered_trades)
+                total_premium = sum(t.get('premium', 0) for t in filtered_trades)
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Market Sentiment", sentiment_label, f"{sentiment_ratio:.1%} calls")
+                with col2:
+                    st.metric("Total Premium", f"${total_premium:,.0f}")
+                with col3:
+                    st.metric("Total Trades", filtered_count)
+                with col4:
+                    iv_avg = np.mean([t['iv'] for t in filtered_trades if t.get('iv', 0) > 0]) \
+                        if any(t.get('iv', 0) > 0 for t in filtered_trades) else "N/A"
+                    st.metric("Avg IV", f"{iv_avg:.1%}" if isinstance(iv_avg, float) else "N/A")
+                visualize_market_summary(filtered_trades)
+                with st.expander("💾 Export Data", expanded=False):
+                    save_to_csv(filtered_trades, "general_flow")
+
+            elif "DTE" in scan_type:
+                display_dte_segregated(filtered_trades)
+                with st.expander("💾 Export Data", expanded=False):
+                    save_to_csv(filtered_trades, "dte_segregated_flow")
+
+            elif "IV Analysis" in scan_type:
+                display_iv_analysis(filtered_trades)
+                with st.expander("💾 Export Data", expanded=False):
+                    save_to_csv(filtered_trades, "iv_analysis")
+
+            elif "Alert" in scan_type:
+                display_alerts(filtered_trades)
+                with st.expander("💾 Export Data", expanded=False):
+                    save_to_csv(filtered_trades, "alerts")
+
     else:
-        with st.sidebar:
-            st.markdown("## 🎛️ Control Panel")
-            scan_type = st.selectbox(
-                "Select Scan Type:",
-                [
-                    "🔍 General Flow Scanner",
-                    "⏰ DTE Segregated Flow",
-                    "📊 IV Analysis",
-                    "🚨 Alert Generator"
-                ]
-            )
-            premium_range = st.selectbox(
-                "Select Premium Range:",
-                [
-                    "All Premiums (No Filter)",
-                    "Under $100K",
-                    "Under $250K",
-                    "$100K - $250K",
-                    "$250K - $500K",
-                    "Above $250K",
-                    "Above $500K",
-                    "Above $1M"
-                ],
-                index=0
-            )
-            dte_filter = st.selectbox(
-                "Select DTE Range:",
-                [
-                    "All DTE",
-                    "0DTE Only",
-                    "Weekly (≤7d)",
-                    "Monthly (≤30d)",
-                    "Quarterly (≤90d)",
-                    "LEAPS (>90d)"
-                ],
-                index=0
-            )
-            iv_filter = st.selectbox(
-                "IV Range Filter:",
-                [
-                    "All IV Levels",
-                    "High IV Only (>30%)",
-                    "Extreme IV Only (>50%)",
-                    "Low IV Only (≤20%)"
-                ] if "IV Analysis" in scan_type else ["All IV Levels"],
-                disabled="IV Analysis" not in scan_type
-            )
+        st.markdown("""
+        ## Welcome! 👋
+        This application combines real-time options flow analysis with advanced pattern recognition and IV analysis.
+        
+        ### Available Views:
+        - 🔍 **General Flow Scanner** - Overview of all unusual options activity
+        - ⏰ **DTE-Segregated Flow** - Trades organized by time to expiration
+        - 📊 **IV Analysis** - Comprehensive implied volatility analysis and opportunities
+        - 🚨 **Smart Alert System** - High-priority alerts with IV considerations
+        
+        Use the sidebar to select scan type and filters, then click **Run Scan** to begin!
+        """)
 
-            run_scan = st.button("🔄 Run Scan", type="primary", use_container_width=True)
 
-        if run_scan:
-            with st.spinner(f"Running {scan_type}..."):
-                trades = fetch_general_flow()
-                filtered_trades = apply_filters(trades, premium_range, dte_filter, iv_filter)
-                original_count = len(trades)
-                filtered_count = len(filtered_trades)
-
-                if filtered_count == 0:
-                    st.warning("⚠️ No trades match your filters. Try adjusting the criteria.")
-                    st.info("💡 Tip: Start with no filters and gradually narrow down.")
-                    return
-
-                st.info(f"**Filter Results:** {original_count} → {filtered_count} trades after applying filters")
-
-                if "General" in scan_type:
-                    sentiment_ratio, sentiment_label = calculate_sentiment_score(filtered_trades)
-                    total_premium = sum(t.get('premium', 0) for t in filtered_trades)
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        st.metric("Market Sentiment", sentiment_label, f"{sentiment_ratio:.1%} calls")
-                    with col2:
-                        st.metric("Total Premium", f"${total_premium:,.0f}")
-                    with col3:
-                        st.metric("Total Trades", filtered_count)
-                    with col4:
-                        iv_avg = np.mean([t['iv'] for t in filtered_trades if t.get('iv', 0) > 0]) \
-                            if any(t.get('iv', 0) > 0 for t in filtered_trades) else "N/A"
-                        st.metric("Avg IV", f"{iv_avg:.1%}" if isinstance(iv_avg, float) else "N/A")
-                    visualize_market_summary(filtered_trades)
-                    with st.expander("💾 Export Data", expanded=False):
-                        save_to_csv(filtered_trades, "general_flow")
-
-                elif "DTE" in scan_type:
-                    display_dte_segregated(filtered_trades)
-                    with st.expander("💾 Export Data", expanded=False):
-                        save_to_csv(filtered_trades, "dte_segregated_flow")
-
-                elif "IV Analysis" in scan_type:
-                    display_iv_analysis(filtered_trades)
-                    with st.expander("💾 Export Data", expanded=False):
-                        save_to_csv(filtered_trades, "iv_analysis")
-
-                elif "Alert" in scan_type:
-                    display_alerts(filtered_trades)
-                    with st.expander("💾 Export Data", expanded=False):
-                        save_to_csv(filtered_trades, "alerts")
-        else:
-            st.markdown("""
-            ## Welcome! 👋
-            This application combines real-time options flow analysis with advanced pattern recognition and IV analysis.
-            ### Available Views:
-            - 🔍 **General Flow Scanner** - Overview of all unusual options activity
-            - ⏰ **DTE-Segregated Flow** - Trades organized by time to expiration
-            - 📊 **IV Analysis** - Comprehensive implied volatility analysis and opportunities
-            - 🚨 **Smart Alert System** - High-priority alerts with IV considerations
-            
-            Use the sidebar to select scan type and filters, then click **Run Scan** to begin!
-            """)
-            
 if __name__ == "__main__":
     main()
