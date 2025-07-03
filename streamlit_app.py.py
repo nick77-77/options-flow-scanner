@@ -269,7 +269,7 @@ def fetch_enhanced_flow():
     params = {
         'issue_types[]': ['Common Stock', 'ADR'],
         'min_dte': 0,  # Include 0DTE
-        'min_volume_oi_ratio': 0.5,  # Lower threshold
+        'min_volume_oi_ratio': 0.1,  # Much lower threshold to catch more activity
         'rule_name[]': ['RepeatedHits', 'RepeatedHitsAscendingFill', 'RepeatedHitsDescendingFill'],
         'limit': config.LIMIT
     }
@@ -291,8 +291,9 @@ def fetch_enhanced_flow():
                 continue
 
             premium = float(trade.get('total_premium', 0))
-            if premium < config.MIN_PREMIUM:
-                continue
+            # Removed minimum premium filter here - let UI filters handle it
+            # if premium < config.MIN_PREMIUM:
+            #     continue
 
             # Enhanced time parsing
             utc_time_str = trade.get('created_at', 'N/A')
@@ -513,21 +514,75 @@ with st.sidebar:
     )
     
     # Filters
-    st.markdown("### Filters")
-    min_premium = st.number_input("Min Premium ($)", value=50000, step=10000)
-    max_dte = st.slider("Max DTE", 0, 365, 30)
+    st.markdown("### Premium Range Filters")
+    premium_range = st.selectbox(
+        "Select Premium Range:",
+        [
+            "All Premiums (No Filter)",
+            "Under $100K",
+            "Under $250K", 
+            "$100K - $250K",
+            "$250K - $500K",
+            "Above $250K",
+            "Above $500K",
+            "Above $1M"
+        ],
+        index=1  # Default to "Under $100K"
+    )
+    
+    st.markdown("### Activity Filters")
     include_selling = st.checkbox("Include Selling Activity", value=True)
+    dte_filter = st.selectbox(
+        "Time to Expiry:",
+        ["All DTE", "0DTE Only", "Weekly (≤7d)", "Monthly (≤30d)", "Quarterly (≤90d)"],
+        index=0
+    )
     
     run_scan = st.button("🔄 Run Enhanced Scan", type="primary", use_container_width=True)
     
     if st.button("📱 Quick 0DTE Scan", use_container_width=True):
-        max_dte = 0
+        premium_range = "All Premiums (No Filter)"
+        dte_filter = "0DTE Only"
         run_scan = True
 
 # Main execution
 if run_scan:
     with st.spinner(f"Running {scan_type}..."):
         trades = fetch_enhanced_flow()
+        
+        # Apply premium range filters
+        def apply_premium_filter(premium, range_selection):
+            if range_selection == "All Premiums (No Filter)":
+                return True
+            elif range_selection == "Under $100K":
+                return premium < 100000
+            elif range_selection == "Under $250K":
+                return premium < 250000
+            elif range_selection == "$100K - $250K":
+                return 100000 <= premium < 250000
+            elif range_selection == "$250K - $500K":
+                return 250000 <= premium < 500000
+            elif range_selection == "Above $250K":
+                return premium >= 250000
+            elif range_selection == "Above $500K":
+                return premium >= 500000
+            elif range_selection == "Above $1M":
+                return premium >= 1000000
+            return True
+        
+        # Apply DTE filters
+        def apply_dte_filter(dte, dte_selection):
+            if dte_selection == "All DTE":
+                return True
+            elif dte_selection == "0DTE Only":
+                return dte == 0
+            elif dte_selection == "Weekly (≤7d)":
+                return dte <= 7
+            elif dte_selection == "Monthly (≤30d)":
+                return dte <= 30
+            elif dte_selection == "Quarterly (≤90d)":
+                return dte <= 90
+            return True
         
         # Apply filters with safe comparisons
         filtered_trades = []
@@ -539,13 +594,14 @@ if run_scan:
                 trade_order_side = str(trade.get('order_side', ''))
                 
                 # Apply filters
-                if trade_premium >= min_premium and trade_dte <= max_dte:
+                if (apply_premium_filter(trade_premium, premium_range) and 
+                    apply_dte_filter(trade_dte, dte_filter)):
                     if include_selling or 'BUY' in trade_order_side:
                         filtered_trades.append(trade)
             except (ValueError, TypeError):
                 continue  # Skip trades with invalid data
         
-        st.success(f"Found {len(filtered_trades)} trades matching criteria")
+        st.success(f"Found {len(filtered_trades)} trades matching criteria (Premium: {premium_range}, DTE: {dte_filter})")
         
         if "Comprehensive" in scan_type:
             create_enhanced_dashboard(filtered_trades)
