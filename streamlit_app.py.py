@@ -338,7 +338,72 @@ def fetch_general_flow():
         st.error(f"Error fetching general flow: {e}")
         return []
 
-# --- IV ANALYSIS FUNCTIONS ---
+# --- FILTER FUNCTIONS ---
+def apply_premium_filter(trades, premium_range):
+    """Apply premium range filter to trades"""
+    if premium_range == "All Premiums (No Filter)":
+        return trades
+    
+    filtered_trades = []
+    for trade in trades:
+        premium = trade.get('premium', 0)
+        
+        if premium_range == "Under $100K" and premium < 100000:
+            filtered_trades.append(trade)
+        elif premium_range == "Under $250K" and premium < 250000:
+            filtered_trades.append(trade)
+        elif premium_range == "$100K - $250K" and 100000 <= premium < 250000:
+            filtered_trades.append(trade)
+        elif premium_range == "$250K - $500K" and 250000 <= premium < 500000:
+            filtered_trades.append(trade)
+        elif premium_range == "Above $250K" and premium >= 250000:
+            filtered_trades.append(trade)
+        elif premium_range == "Above $500K" and premium >= 500000:
+            filtered_trades.append(trade)
+        elif premium_range == "Above $1M" and premium >= 1000000:
+            filtered_trades.append(trade)
+    
+    return filtered_trades
+
+def apply_dte_filter(trades, dte_filter):
+    """Apply DTE filter to trades"""
+    if dte_filter == "All DTE":
+        return trades
+    
+    filtered_trades = []
+    for trade in trades:
+        dte = trade.get('dte', 0)
+        
+        if dte_filter == "0DTE Only" and dte == 0:
+            filtered_trades.append(trade)
+        elif dte_filter == "Weekly (≤7d)" and dte <= 7:
+            filtered_trades.append(trade)
+        elif dte_filter == "Monthly (≤30d)" and dte <= 30:
+            filtered_trades.append(trade)
+        elif dte_filter == "Quarterly (≤90d)" and dte <= 90:
+            filtered_trades.append(trade)
+        elif dte_filter == "LEAPS (>90d)" and dte > 90:
+            filtered_trades.append(trade)
+    
+    return filtered_trades
+
+def apply_iv_filter(trades, iv_filter):
+    """Apply IV filter to trades"""
+    if iv_filter == "All IV Levels":
+        return trades
+    
+    filtered_trades = []
+    for trade in trades:
+        iv = trade.get('iv', 0)
+        
+        if iv_filter == "High IV Only (>30%)" and iv > 0.30:
+            filtered_trades.append(trade)
+        elif iv_filter == "Extreme IV Only (>50%)" and iv > 0.50:
+            filtered_trades.append(trade)
+        elif iv_filter == "Low IV Only (≤20%)" and iv <= 0.20:
+            filtered_trades.append(trade)
+    
+    return filtered_trades
 def display_iv_analysis(trades):
     """Display comprehensive IV analysis"""
     st.markdown("### 📊 Implied Volatility Analysis")
@@ -617,9 +682,41 @@ with st.sidebar:
         ]
     )
     
+    # Premium Range Filter
+    st.markdown("### 💰 Premium Range Filter")
+    premium_range = st.selectbox(
+        "Select Premium Range:",
+        [
+            "All Premiums (No Filter)",
+            "Under $100K",
+            "Under $250K", 
+            "$100K - $250K",
+            "$250K - $500K",
+            "Above $250K",
+            "Above $500K",
+            "Above $1M"
+        ],
+        index=0
+    )
+    
+    # DTE Filter
+    st.markdown("### 📅 Time to Expiry Filter")
+    dte_filter = st.selectbox(
+        "Select DTE Range:",
+        [
+            "All DTE",
+            "0DTE Only",
+            "Weekly (≤7d)",
+            "Monthly (≤30d)",
+            "Quarterly (≤90d)",
+            "LEAPS (>90d)"
+        ],
+        index=0
+    )
+    
     # IV Filter Options
     if "IV Analysis" in scan_type:
-        st.markdown("### IV Filter Options")
+        st.markdown("### 📊 IV Filter Options")
         iv_filter = st.selectbox(
             "IV Range Filter:",
             [
@@ -633,58 +730,87 @@ with st.sidebar:
         show_iv_crush = st.checkbox("Show IV Crush Candidates", value=True)
         show_volatility_plays = st.checkbox("Show Volatility Strategies", value=True)
     
+    # Quick Filter Buttons
+    st.markdown("### ⚡ Quick Filters")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🔥 High Premium", use_container_width=True):
+            premium_range = "Above $500K"
+    with col2:
+        if st.button("💎 Mega Trades", use_container_width=True):
+            premium_range = "Above $1M"
+    
     run_scan = st.button("🔄 Run Scan", type="primary", use_container_width=True)
 
 if run_scan:
     with st.spinner(f"Running {scan_type}..."):
         trades = fetch_general_flow()
         
+        # Apply Premium Range Filter
+        original_count = len(trades)
+        trades = apply_premium_filter(trades, premium_range)
+        premium_filtered_count = len(trades)
+        
+        # Apply DTE Filter
+        trades = apply_dte_filter(trades, dte_filter)
+        dte_filtered_count = len(trades)
+        
         # Apply IV filters if in IV Analysis mode
         if "IV Analysis" in scan_type and 'iv_filter' in locals():
-            if iv_filter == "High IV Only (>30%)":
-                trades = [t for t in trades if t.get('iv', 0) > 0.30]
-            elif iv_filter == "Extreme IV Only (>50%)":
-                trades = [t for t in trades if t.get('iv', 0) > 0.50]
-            elif iv_filter == "Low IV Only (≤20%)":
-                trades = [t for t in trades if t.get('iv', 0) <= 0.20]
+            trades = apply_iv_filter(trades, iv_filter)
+            iv_filtered_count = len(trades)
         
-        if "General" in scan_type:
-            st.markdown("### 📊 Market Summary")
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                sentiment_ratio, sentiment_label = calculate_sentiment_score(trades)
-                st.metric("Market Sentiment", sentiment_label, f"{sentiment_ratio:.1%} calls")
-            with col2:
-                total_premium = sum(t.get('premium', 0) for t in trades)
-                st.metric("Total Premium", f"${total_premium:,.0f}")
-            with col3:
-                st.metric("Total Trades", len(trades))
-            with col4:
-                iv_trades = [t for t in trades if t.get('iv', 0) > 0]
-                if iv_trades:
-                    avg_iv = np.mean([t['iv'] for t in iv_trades])
-                    st.metric("Average IV", f"{avg_iv:.1%}")
-                else:
-                    st.metric("Average IV", "N/A")
+        # Show filter results
+        if premium_range != "All Premiums (No Filter)" or dte_filter != "All DTE":
+            st.info(f"**Filter Results:** {original_count} → {len(trades)} trades after applying filters")
+            if premium_range != "All Premiums (No Filter)":
+                st.write(f"📊 Premium Filter ({premium_range}): {premium_filtered_count} trades")
+            if dte_filter != "All DTE":
+                st.write(f"📅 DTE Filter ({dte_filter}): {dte_filtered_count} trades")
+            if "IV Analysis" in scan_type and 'iv_filter' in locals() and iv_filter != "All IV Levels":
+                st.write(f"📊 IV Filter ({iv_filter}): {len(trades)} trades")
+        
+        if not trades:
+            st.warning("⚠️ No trades match your current filters. Try adjusting the premium range or DTE filters.")
+            st.info("💡 **Tip:** Try 'All Premiums (No Filter)' and 'All DTE' to see all available data.")
+        else:
+            if "General" in scan_type:
+                st.markdown("### 📊 Market Summary")
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    sentiment_ratio, sentiment_label = calculate_sentiment_score(trades)
+                    st.metric("Market Sentiment", sentiment_label, f"{sentiment_ratio:.1%} calls")
+                with col2:
+                    total_premium = sum(t.get('premium', 0) for t in trades)
+                    st.metric("Total Premium", f"${total_premium:,.0f}")
+                with col3:
+                    st.metric("Total Trades", len(trades))
+                with col4:
+                    iv_trades = [t for t in trades if t.get('iv', 0) > 0]
+                    if iv_trades:
+                        avg_iv = np.mean([t['iv'] for t in iv_trades])
+                        st.metric("Average IV", f"{avg_iv:.1%}")
+                    else:
+                        st.metric("Average IV", "N/A")
 
-            visualize_market_summary(trades)
-            with st.expander("💾 Export Data", expanded=False):
-                save_to_csv(trades, "general_flow")
+                visualize_market_summary(trades)
+                with st.expander("💾 Export Data", expanded=False):
+                    save_to_csv(trades, "general_flow")
 
-        elif "DTE" in scan_type:
-            display_dte_segregated(trades)
-            with st.expander("💾 Export Data", expanded=False):
-                save_to_csv(trades, "dte_segregated_flow")
+            elif "DTE" in scan_type:
+                display_dte_segregated(trades)
+                with st.expander("💾 Export Data", expanded=False):
+                    save_to_csv(trades, "dte_segregated_flow")
 
-        elif "IV Analysis" in scan_type:
-            display_iv_analysis(trades)
-            with st.expander("💾 Export Data", expanded=False):
-                save_to_csv(trades, "iv_analysis")
+            elif "IV Analysis" in scan_type:
+                display_iv_analysis(trades)
+                with st.expander("💾 Export Data", expanded=False):
+                    save_to_csv(trades, "iv_analysis")
 
-        elif "Alert" in scan_type:
-            display_alerts(trades)
-            with st.expander("💾 Export Data", expanded=False):
-                save_to_csv(trades, "alerts")
+            elif "Alert" in scan_type:
+                display_alerts(trades)
+                with st.expander("💾 Export Data", expanded=False):
+                    save_to_csv(trades, "alerts")
 
 else:
     st.markdown("""
@@ -698,6 +824,20 @@ else:
     - 📊 **IV Analysis** - Comprehensive implied volatility analysis and opportunities
     - 🚨 **Smart Alert System** - High-priority alerts with IV considerations
     
+    ### Premium Range Filters:
+    - 💰 **Under $100K** - Smaller retail-focused trades
+    - 💰 **$100K - $250K** - Mid-size institutional trades
+    - 💰 **$250K - $500K** - Large institutional trades
+    - 💰 **Above $500K** - Massive institutional flows
+    - 💰 **Above $1M** - Whale trades and mega flows
+    
+    ### DTE (Days to Expiry) Filters:
+    - ⚡ **0DTE** - Same-day expiration plays
+    - 📅 **Weekly (≤7d)** - Short-term directional bets
+    - 📅 **Monthly (≤30d)** - Standard monthly options
+    - 📅 **Quarterly (≤90d)** - Longer-term strategies
+    - 📅 **LEAPS (>90d)** - Long-term investment plays
+    
     ### IV Analysis Features:
     - **High IV Identification** - Spot elevated volatility opportunities
     - **IV Crush Detection** - Identify positions at risk of volatility collapse
@@ -707,5 +847,11 @@ else:
     ### Example Trade Format:
     `GOOGL 160 2025-07-25 $2219.76 $4,363,870.0 22 1739 6 10:30 AM Sweep Orders, Block Trade`
     
-    Select a scan type from the sidebar and click **Run Scan** to begin!
+    **💡 Pro Tips:**
+    - Use **Quick Filters** for instant access to high-value trades
+    - Combine **Premium** and **DTE** filters for targeted analysis
+    - Check **IV Analysis** with premium filters to find volatility opportunities
+    - **Above $1M** trades often indicate institutional positioning
+    
+    Select your filters and scan type from the sidebar, then click **Run Scan** to begin!
     """)
