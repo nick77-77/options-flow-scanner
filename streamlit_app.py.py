@@ -237,7 +237,7 @@ def fetch_general_flow():
         'Accept': 'application/json, text/plain',
         'Authorization': config.UW_TOKEN
     }
-    url = 'https://api.unusualwhales.com/api/option-trades/flow-alerts '
+    url = 'https://api.unusualwhales.com/api/option-trades/flow-alerts'
     params = {
         'issue_types[]': ['Common Stock', 'ADR'],
         'min_dte': 1,
