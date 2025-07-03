@@ -41,6 +41,18 @@ def parse_option_chain(opt_str):
     except Exception:
         return None, None, None, None, None
 
+def get_time_to_expiry_category(dte):
+    if dte <= 1:
+        return "0DTE"
+    elif dte <= 7:
+        return "Weekly"
+    elif dte <= 30:
+        return "Monthly"
+    elif dte <= 90:
+        return "Quarterly"
+    else:
+        return "LEAPS"
+
 def detect_basic_scenarios(trade, underlying_price=None):
     """Simplified scenario detection"""
     scenarios = []
@@ -169,6 +181,7 @@ def fetch_simple_flow():
                 'strike': strike,
                 'expiry': expiry,
                 'dte': dte,
+                'dte_category': get_time_to_expiry_category(dte),
                 'price': price,
                 'premium': premium,
                 'volume': volume,
@@ -233,6 +246,7 @@ def display_calls_and_puts(trades):
                 'Premium': f"${t['premium']:,.0f}",
                 'Volume': t['volume'],
                 'DTE': t['dte'],
+                'Category': t.get('dte_category', 'Unknown'),
                 'Moneyness': t['moneyness'],
                 'Time': t['time_ny']
             } for t in sorted(call_trades, key=lambda x: x['premium'], reverse=True)[:25]])
@@ -250,6 +264,7 @@ def display_calls_and_puts(trades):
                 'Premium': f"${t['premium']:,.0f}",
                 'Volume': t['volume'],
                 'DTE': t['dte'],
+                'Category': t.get('dte_category', 'Unknown'),
                 'Moneyness': t['moneyness'],
                 'Time': t['time_ny']
             } for t in sorted(put_trades, key=lambda x: x['premium'], reverse=True)[:25]])
@@ -270,6 +285,7 @@ def display_top_trades(trades):
             'Premium': f"${t['premium']:,.0f}",
             'Volume': t['volume'],
             'DTE': t['dte'],
+            'Category': t.get('dte_category', 'Unknown'),
             'Moneyness': t['moneyness'],
             'Scenarios': ', '.join(t['scenarios'][:2]),
             'Time': t['time_ny']
@@ -295,13 +311,13 @@ with st.sidebar:
     # DTE filter
     dte_filter = st.selectbox(
         "Days to Expiry:",
-        ["All", "0DTE", "This Week (≤7d)", "This Month (≤30d)"]
+        ["All", "0DTE", "Weekly (≤7d)", "Monthly (≤30d)", "Quarterly (≤90d)", "LEAPS (>90d)"]
     )
     
     # View selection
     view_type = st.selectbox(
         "View Type:",
-        ["📊 Calls & Puts", "🏆 Top Trades", "📈 Charts & Summary"]
+        ["📊 Calls & Puts", "🏆 Top Trades", "📈 Charts & Summary", "⏰ DTE Categories"]
     )
     
     run_scan = st.button("🔄 Scan Options Flow", type="primary", use_container_width=True)
@@ -335,9 +351,13 @@ if run_scan:
             dte_ok = True
             if dte_filter == "0DTE" and trade['dte'] != 0:
                 dte_ok = False
-            elif dte_filter == "This Week (≤7d)" and trade['dte'] > 7:
+            elif dte_filter == "Weekly (≤7d)" and trade['dte'] > 7:
                 dte_ok = False
-            elif dte_filter == "This Month (≤30d)" and trade['dte'] > 30:
+            elif dte_filter == "Monthly (≤30d)" and trade['dte'] > 30:
+                dte_ok = False
+            elif dte_filter == "Quarterly (≤90d)" and trade['dte'] > 90:
+                dte_ok = False
+            elif dte_filter == "LEAPS (>90d)" and trade['dte'] <= 90:
                 dte_ok = False
             
             if premium_ok and dte_ok:
@@ -377,6 +397,48 @@ if run_scan:
                 create_simple_charts(filtered_trades)
                 st.markdown("---")
                 display_top_trades(filtered_trades)
+            elif view_type == "⏰ DTE Categories":
+                # DTE Category view
+                st.markdown("### ⏰ Trades by Time to Expiry")
+                
+                # Group trades by DTE category
+                dte_groups = {}
+                for trade in filtered_trades:
+                    category = trade.get('dte_category', 'Unknown')
+                    if category not in dte_groups:
+                        dte_groups[category] = []
+                    dte_groups[category].append(trade)
+                
+                # Display each category
+                for category in ["0DTE", "Weekly", "Monthly", "Quarterly", "LEAPS"]:
+                    if category in dte_groups:
+                        trades_in_category = dte_groups[category]
+                        
+                        # Category header with stats
+                        col1, col2, col3 = st.columns([2, 1, 1])
+                        with col1:
+                            st.markdown(f"#### {category} ({len(trades_in_category)} trades)")
+                        with col2:
+                            total_premium = sum(t['premium'] for t in trades_in_category)
+                            st.metric("Total Premium", f"${total_premium:,.0f}")
+                        with col3:
+                            call_ratio = len([t for t in trades_in_category if t['type'] == 'C']) / len(trades_in_category)
+                            st.metric("Call %", f"{call_ratio:.0%}")
+                        
+                        # Top trades in this category
+                        category_df = pd.DataFrame([{
+                            'Ticker': t['ticker'],
+                            'Type': '🟢 CALL' if t['type'] == 'C' else '🔴 PUT',
+                            'Strike': f"${t['strike']:.0f}",
+                            'Price': f"${t['price']:.2f}" if t['price'] > 0 else 'N/A',
+                            'Premium': f"${t['premium']:,.0f}",
+                            'Volume': t['volume'],
+                            'DTE': t['dte'],
+                            'Time': t['time_ny']
+                        } for t in sorted(trades_in_category, key=lambda x: x['premium'], reverse=True)[:10]])
+                        
+                        st.dataframe(category_df, use_container_width=True)
+                        st.markdown("---")
             
             # Simple export
             st.markdown("---")
