@@ -15,7 +15,7 @@ class Config:
     EXCLUDE_TICKERS = {'TSLA', 'MSTR', 'CRCL'}
     ALLOWED_TICKERS = {'QQQ', 'SPY', 'IWM'}
     MIN_PREMIUM = 50000  # Lowered to catch more activity
-    LIMIT = 1000  # Increased for better analysis
+    LIMIT = 3000  # Increased for better analysis
     SCENARIO_OTM_CALL_MIN_PREMIUM = 100000
     SCENARIO_ITM_CONV_MIN_PREMIUM = 50000
     SCENARIO_SWEEP_VOLUME_OI_RATIO = 2
