@@ -855,3 +855,18 @@ else:
     
     Select your filters and scan type from the sidebar, then click **Run Scan** to begin!
     """)
+    st.title("⚠️ Disclaimer")
+    st.markdown("""
+    This application is for **informational and educational purposes only**. It is **not intended to provide financial, investment, or legal advice**.
+    
+    ### Important Notes:
+    - **No Guarantee of Accuracy**: While efforts are made to ensure the accuracy of the data, no guarantees are made regarding its completeness, accuracy, or timeliness.
+    - **Not Financial Advice**: Users should consult with a licensed financial advisor before making any investment decisions.
+    - **Educational Use Only**: This tool is designed to assist users in analyzing options flow and market trends, but it does not constitute professional advice.
+    - **Use at Your Own Risk**: The creators and maintainers of this tool will not be held liable for any losses or damages arising from the use of this application.
+    - **No Affiliation**: This tool is not affiliated, endorsed, or sponsored by any financial institutions or data providers.
+    
+    If you have any questions about the content or usage of this tool, please reach out.
+    
+    Thank you for using this application!
+    """)
