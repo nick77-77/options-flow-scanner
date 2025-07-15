@@ -22,6 +22,12 @@ class Config:
     IV_CRUSH_THRESHOLD = 0.15  # 15% IV threshold for crush detection
     HIGH_VOL_OI_RATIO = 5.0  # High volume to OI ratio threshold
     UNUSUAL_OI_THRESHOLD = 1000  # Unusual open interest threshold
+    
+    # New pattern recognition thresholds
+    GAMMA_SQUEEZE_THRESHOLD = 0.10  # 10% price movement threshold
+    IV_SPIKE_THRESHOLD = 0.20  # 20% IV increase threshold
+    MULTI_LEG_TIME_WINDOW = 300  # 5 minutes in seconds
+    CORRELATION_THRESHOLD = 0.7  # Correlation threshold for cross-asset analysis
 
 config = Config()
 
@@ -172,6 +178,352 @@ def analyze_open_interest(trade_data, ticker_trades):
         analysis['oi_concentration'] = 'Some Concentration'
     
     return analysis
+
+# --- NEW PATTERN RECOGNITION FUNCTIONS ---
+def detect_multi_leg_strategies(ticker_trades):
+    """
+    Detect multi-leg option strategies like spreads, straddles, and collars
+    """
+    strategies = []
+    
+    # Group trades by ticker and time window
+    time_grouped = defaultdict(list)
+    for trade in ticker_trades:
+        try:
+            trade_time = datetime.fromisoformat(trade.get('time_utc', '').replace('Z', '+00:00'))
+            time_key = int(trade_time.timestamp() // config.MULTI_LEG_TIME_WINDOW)
+            time_grouped[time_key].append(trade)
+        except:
+            continue
+    
+    for time_window, trades in time_grouped.items():
+        if len(trades) < 2:
+            continue
+            
+        # Sort by strike price
+        trades.sort(key=lambda x: float(x.get('strike', 0)))
+        
+        # Detect vertical spreads (same expiry, different strikes)
+        call_trades = [t for t in trades if t.get('type') == 'C']
+        put_trades = [t for t in trades if t.get('type') == 'P']
+        
+        # Call spreads
+        if len(call_trades) >= 2:
+            for i in range(len(call_trades) - 1):
+                trade1, trade2 = call_trades[i], call_trades[i + 1]
+                if (trade1.get('expiry') == trade2.get('expiry') and 
+                    trade1.get('trade_side', '') != trade2.get('trade_side', '')):
+                    
+                    if 'BUY' in trade1.get('trade_side', '') and 'SELL' in trade2.get('trade_side', ''):
+                        strategies.append({
+                            'strategy': 'Call Debit Spread',
+                            'ticker': trade1.get('ticker'),
+                            'strikes': f"{trade1.get('strike'):.0f}/{trade2.get('strike'):.0f}",
+                            'expiry': trade1.get('expiry'),
+                            'premium': trade1.get('premium', 0) - trade2.get('premium', 0),
+                            'confidence': 'High'
+                        })
+                    elif 'SELL' in trade1.get('trade_side', '') and 'BUY' in trade2.get('trade_side', ''):
+                        strategies.append({
+                            'strategy': 'Call Credit Spread',
+                            'ticker': trade1.get('ticker'),
+                            'strikes': f"{trade1.get('strike'):.0f}/{trade2.get('strike'):.0f}",
+                            'expiry': trade1.get('expiry'),
+                            'premium': trade2.get('premium', 0) - trade1.get('premium', 0),
+                            'confidence': 'High'
+                        })
+        
+        # Put spreads
+        if len(put_trades) >= 2:
+            for i in range(len(put_trades) - 1):
+                trade1, trade2 = put_trades[i], put_trades[i + 1]
+                if (trade1.get('expiry') == trade2.get('expiry') and 
+                    trade1.get('trade_side', '') != trade2.get('trade_side', '')):
+                    
+                    if 'BUY' in trade1.get('trade_side', '') and 'SELL' in trade2.get('trade_side', ''):
+                        strategies.append({
+                            'strategy': 'Put Debit Spread',
+                            'ticker': trade1.get('ticker'),
+                            'strikes': f"{trade1.get('strike'):.0f}/{trade2.get('strike'):.0f}",
+                            'expiry': trade1.get('expiry'),
+                            'premium': trade1.get('premium', 0) - trade2.get('premium', 0),
+                            'confidence': 'High'
+                        })
+        
+        # Detect straddles/strangles (same strike or different strikes, same expiry)
+        if len(call_trades) >= 1 and len(put_trades) >= 1:
+            for call_trade in call_trades:
+                for put_trade in put_trades:
+                    if (call_trade.get('expiry') == put_trade.get('expiry') and
+                        call_trade.get('trade_side', '') == put_trade.get('trade_side', '')):
+                        
+                        if abs(float(call_trade.get('strike', 0)) - float(put_trade.get('strike', 0))) < 1:
+                            # Straddle
+                            strategies.append({
+                                'strategy': 'Long Straddle' if 'BUY' in call_trade.get('trade_side', '') else 'Short Straddle',
+                                'ticker': call_trade.get('ticker'),
+                                'strikes': f"{call_trade.get('strike'):.0f}",
+                                'expiry': call_trade.get('expiry'),
+                                'premium': call_trade.get('premium', 0) + put_trade.get('premium', 0),
+                                'confidence': 'High'
+                            })
+                        elif abs(float(call_trade.get('strike', 0)) - float(put_trade.get('strike', 0))) > 1:
+                            # Strangle
+                            strategies.append({
+                                'strategy': 'Long Strangle' if 'BUY' in call_trade.get('trade_side', '') else 'Short Strangle',
+                                'ticker': call_trade.get('ticker'),
+                                'strikes': f"{put_trade.get('strike'):.0f}/{call_trade.get('strike'):.0f}",
+                                'expiry': call_trade.get('expiry'),
+                                'premium': call_trade.get('premium', 0) + put_trade.get('premium', 0),
+                                'confidence': 'Medium'
+                            })
+        
+        # Detect collars (protective put + covered call)
+        if len(call_trades) >= 1 and len(put_trades) >= 1:
+            for call_trade in call_trades:
+                for put_trade in put_trades:
+                    if (call_trade.get('expiry') == put_trade.get('expiry') and
+                        'SELL' in call_trade.get('trade_side', '') and 'BUY' in put_trade.get('trade_side', '') and
+                        float(call_trade.get('strike', 0)) > float(put_trade.get('strike', 0))):
+                        
+                        strategies.append({
+                            'strategy': 'Collar',
+                            'ticker': call_trade.get('ticker'),
+                            'strikes': f"{put_trade.get('strike'):.0f}/{call_trade.get('strike'):.0f}",
+                            'expiry': call_trade.get('expiry'),
+                            'premium': call_trade.get('premium', 0) - put_trade.get('premium', 0),
+                            'confidence': 'Medium'
+                        })
+    
+    return strategies
+
+def detect_gamma_squeeze_indicators(ticker_trades):
+    """
+    Detect potential gamma squeeze conditions
+    """
+    gamma_indicators = []
+    
+    # Group by ticker
+    ticker_groups = defaultdict(list)
+    for trade in ticker_trades:
+        ticker_groups[trade.get('ticker', '')].append(trade)
+    
+    for ticker, trades in ticker_groups.items():
+        if len(trades) < 3:
+            continue
+            
+        # Calculate metrics for gamma squeeze detection
+        call_trades = [t for t in trades if t.get('type') == 'C']
+        total_call_volume = sum(float(t.get('volume', 0)) for t in call_trades)
+        total_call_oi = sum(float(t.get('open_interest', 0)) for t in call_trades)
+        
+        # Look for high call volume relative to OI
+        if total_call_oi > 0:
+            call_vol_oi_ratio = total_call_volume / total_call_oi
+            
+            # Check for concentrated strikes near current price
+            if len(call_trades) > 0:
+                avg_underlying = np.mean([float(t.get('underlying_price', 0)) for t in call_trades if t.get('underlying_price')])
+                
+                # Find strikes within 5% of current price
+                near_money_calls = [
+                    t for t in call_trades 
+                    if abs(float(t.get('strike', 0)) - avg_underlying) / avg_underlying < 0.05
+                ]
+                
+                if len(near_money_calls) >= 2 and call_vol_oi_ratio > 3:
+                    total_near_money_volume = sum(float(t.get('volume', 0)) for t in near_money_calls)
+                    total_near_money_premium = sum(float(t.get('premium', 0)) for t in near_money_calls)
+                    
+                    # Check for buying pressure
+                    buy_trades = [t for t in near_money_calls if 'BUY' in t.get('trade_side', '')]
+                    buy_ratio = len(buy_trades) / len(near_money_calls) if near_money_calls else 0
+                    
+                    if buy_ratio > 0.6:  # 60% or more are buys
+                        gamma_indicators.append({
+                            'ticker': ticker,
+                            'indicator': 'Gamma Squeeze Setup',
+                            'strikes': [f"{t.get('strike'):.0f}" for t in near_money_calls[:3]],
+                            'total_volume': total_near_money_volume,
+                            'total_premium': total_near_money_premium,
+                            'vol_oi_ratio': call_vol_oi_ratio,
+                            'buy_ratio': buy_ratio,
+                            'confidence': 'High' if buy_ratio > 0.75 else 'Medium'
+                        })
+    
+    return gamma_indicators
+
+def detect_iv_spikes(ticker_trades):
+    """
+    Detect unusual IV spikes that may indicate upcoming events
+    """
+    iv_alerts = []
+    
+    # Group by ticker
+    ticker_groups = defaultdict(list)
+    for trade in ticker_trades:
+        if trade.get('iv', 0) > 0:
+            ticker_groups[trade.get('ticker', '')].append(trade)
+    
+    for ticker, trades in ticker_groups.items():
+        if len(trades) < 2:
+            continue
+            
+        # Calculate average IV for the ticker
+        iv_values = [float(t.get('iv', 0)) for t in trades if t.get('iv', 0) > 0]
+        if not iv_values:
+            continue
+            
+        avg_iv = np.mean(iv_values)
+        max_iv = max(iv_values)
+        
+        # Look for individual trades with IV significantly above average
+        for trade in trades:
+            trade_iv = float(trade.get('iv', 0))
+            if trade_iv > avg_iv * (1 + config.IV_SPIKE_THRESHOLD):
+                iv_alerts.append({
+                    'ticker': ticker,
+                    'strike': trade.get('strike'),
+                    'type': trade.get('type'),
+                    'expiry': trade.get('expiry'),
+                    'iv': trade_iv,
+                    'avg_iv': avg_iv,
+                    'iv_premium': (trade_iv - avg_iv) / avg_iv,
+                    'premium': trade.get('premium', 0),
+                    'trade_side': trade.get('trade_side', 'UNKNOWN'),
+                    'confidence': 'High' if trade_iv > avg_iv * 1.5 else 'Medium'
+                })
+        
+        # Check for overall elevated IV across multiple strikes
+        if avg_iv > config.EXTREME_IV_THRESHOLD:
+            high_iv_trades = [t for t in trades if float(t.get('iv', 0)) > config.EXTREME_IV_THRESHOLD]
+            if len(high_iv_trades) >= 3:
+                iv_alerts.append({
+                    'ticker': ticker,
+                    'alert_type': 'Broad IV Elevation',
+                    'avg_iv': avg_iv,
+                    'max_iv': max_iv,
+                    'affected_strikes': len(high_iv_trades),
+                    'total_premium': sum(float(t.get('premium', 0)) for t in high_iv_trades),
+                    'confidence': 'High'
+                })
+    
+    return iv_alerts
+
+def analyze_cross_asset_correlation(ticker_trades):
+    """
+    Analyze correlations between options flow and identify related movements
+    """
+    correlations = []
+    
+    # Group by sector/industry (simplified mapping)
+    sector_map = {
+        'SPY': 'Market',
+        'QQQ': 'Tech',
+        'IWM': 'Small Cap',
+        'AAPL': 'Tech',
+        'MSFT': 'Tech',
+        'GOOGL': 'Tech',
+        'AMZN': 'Tech',
+        'NVDA': 'Tech',
+        'JPM': 'Finance',
+        'BAC': 'Finance',
+        'WFC': 'Finance',
+        'XOM': 'Energy',
+        'CVX': 'Energy'
+    }
+    
+    # Group trades by sector
+    sector_trades = defaultdict(list)
+    for trade in ticker_trades:
+        ticker = trade.get('ticker', '')
+        sector = sector_map.get(ticker, 'Other')
+        sector_trades[sector].append(trade)
+    
+    # Analyze flow patterns within sectors
+    for sector, trades in sector_trades.items():
+        if len(trades) < 5:
+            continue
+            
+        # Calculate sector metrics
+        total_premium = sum(float(t.get('premium', 0)) for t in trades)
+        call_premium = sum(float(t.get('premium', 0)) for t in trades if t.get('type') == 'C')
+        put_premium = sum(float(t.get('premium', 0)) for t in trades if t.get('type') == 'P')
+        
+        call_ratio = call_premium / total_premium if total_premium > 0 else 0
+        
+        # Look for concentrated sector activity
+        unique_tickers = len(set(t.get('ticker') for t in trades))
+        if unique_tickers >= 3 and total_premium > 1000000:  # $1M+ across 3+ tickers
+            
+            # Analyze sentiment consistency
+            sentiment = "Bullish" if call_ratio > 0.6 else "Bearish" if call_ratio < 0.4 else "Neutral"
+            
+            correlations.append({
+                'sector': sector,
+                'correlation_type': 'Sector Flow Concentration',
+                'tickers': list(set(t.get('ticker') for t in trades))[:5],
+                'total_premium': total_premium,
+                'call_ratio': call_ratio,
+                'sentiment': sentiment,
+                'trade_count': len(trades),
+                'confidence': 'High' if unique_tickers >= 5 else 'Medium'
+            })
+    
+    # Look for related ticker movements
+    ticker_groups = defaultdict(list)
+    for trade in ticker_trades:
+        ticker_groups[trade.get('ticker')].append(trade)
+    
+    # Compare similar tickers for coordinated activity
+    related_pairs = [
+        ('SPY', 'QQQ'),
+        ('AAPL', 'MSFT'),
+        ('JPM', 'BAC'),
+        ('XOM', 'CVX')
+    ]
+    
+    for ticker1, ticker2 in related_pairs:
+        if ticker1 in ticker_groups and ticker2 in ticker_groups:
+            trades1 = ticker_groups[ticker1]
+            trades2 = ticker_groups[ticker2]
+            
+            # Calculate flow metrics for each
+            metrics1 = calculate_flow_metrics(trades1)
+            metrics2 = calculate_flow_metrics(trades2)
+            
+            # Check for similar patterns
+            if (metrics1['call_ratio'] > 0.6 and metrics2['call_ratio'] > 0.6) or \
+               (metrics1['call_ratio'] < 0.4 and metrics2['call_ratio'] < 0.4):
+                
+                correlations.append({
+                    'correlation_type': 'Pair Trading Pattern',
+                    'ticker1': ticker1,
+                    'ticker2': ticker2,
+                    'ticker1_sentiment': metrics1['sentiment'],
+                    'ticker2_sentiment': metrics2['sentiment'],
+                    'combined_premium': metrics1['total_premium'] + metrics2['total_premium'],
+                    'confidence': 'Medium'
+                })
+    
+    return correlations
+
+def calculate_flow_metrics(trades):
+    """Helper function to calculate flow metrics for a set of trades"""
+    if not trades:
+        return {'total_premium': 0, 'call_ratio': 0, 'sentiment': 'Neutral'}
+    
+    total_premium = sum(float(t.get('premium', 0)) for t in trades)
+    call_premium = sum(float(t.get('premium', 0)) for t in trades if t.get('type') == 'C')
+    
+    call_ratio = call_premium / total_premium if total_premium > 0 else 0
+    sentiment = "Bullish" if call_ratio > 0.6 else "Bearish" if call_ratio < 0.4 else "Neutral"
+    
+    return {
+        'total_premium': total_premium,
+        'call_ratio': call_ratio,
+        'sentiment': sentiment
+    }
 
 def detect_scenarios(trade, underlying_price=None, oi_analysis=None):
     scenarios = []
@@ -917,6 +1269,142 @@ def display_enhanced_summary(trades):
         avg_oi = np.mean([t.get('open_interest', 0) for t in trades])
         st.metric("Avg Open Interest", f"{avg_oi:,.0f}")
 
+def display_pattern_recognition_analysis(trades):
+    """Display advanced pattern recognition results"""
+    st.markdown("### 🔍 Advanced Pattern Recognition")
+    
+    if not trades:
+        st.info("No trades available for pattern analysis")
+        return
+    
+    # Group trades by ticker for pattern analysis
+    ticker_groups = defaultdict(list)
+    for trade in trades:
+        ticker_groups[trade.get('ticker', '')].append(trade)
+    
+    # Multi-leg strategies
+    st.markdown("#### 🎯 Multi-Leg Strategy Detection")
+    all_strategies = []
+    for ticker, ticker_trades in ticker_groups.items():
+        strategies = detect_multi_leg_strategies(ticker_trades)
+        all_strategies.extend(strategies)
+    
+    if all_strategies:
+        strategy_data = []
+        for strategy in all_strategies[:10]:  # Show top 10 strategies
+            strategy_data.append({
+                'Strategy': strategy['strategy'],
+                'Ticker': strategy['ticker'],
+                'Strikes': strategy['strikes'],
+                'Expiry': strategy['expiry'],
+                'Net Premium': f"${strategy['premium']:,.0f}",
+                'Confidence': strategy['confidence']
+            })
+        
+        df = pd.DataFrame(strategy_data)
+        st.dataframe(df, use_container_width=True)
+    else:
+        st.info("No multi-leg strategies detected")
+    
+    # Gamma squeeze indicators
+    st.markdown("#### ⚡ Gamma Squeeze Indicators")
+    gamma_indicators = []
+    for ticker, ticker_trades in ticker_groups.items():
+        indicators = detect_gamma_squeeze_indicators(ticker_trades)
+        gamma_indicators.extend(indicators)
+    
+    if gamma_indicators:
+        gamma_data = []
+        for indicator in gamma_indicators[:5]:  # Show top 5 gamma indicators
+            gamma_data.append({
+                'Ticker': indicator['ticker'],
+                'Indicator': indicator['indicator'],
+                'Key Strikes': ', '.join(indicator['strikes']),
+                'Volume': f"{indicator['total_volume']:,.0f}",
+                'Premium': f"${indicator['total_premium']:,.0f}",
+                'Vol/OI Ratio': f"{indicator['vol_oi_ratio']:.1f}",
+                'Buy Ratio': f"{indicator['buy_ratio']:.1%}",
+                'Confidence': indicator['confidence']
+            })
+        
+        df = pd.DataFrame(gamma_data)
+        st.dataframe(df, use_container_width=True)
+    else:
+        st.info("No gamma squeeze indicators detected")
+    
+    # IV spike analysis
+    st.markdown("#### 📈 Unusual IV Spikes")
+    iv_alerts = []
+    for ticker, ticker_trades in ticker_groups.items():
+        alerts = detect_iv_spikes(ticker_trades)
+        iv_alerts.extend(alerts)
+    
+    if iv_alerts:
+        iv_data = []
+        for alert in iv_alerts[:10]:  # Show top 10 IV alerts
+            if 'alert_type' in alert:
+                # Broad IV elevation
+                iv_data.append({
+                    'Ticker': alert['ticker'],
+                    'Alert Type': alert['alert_type'],
+                    'Avg IV': f"{alert['avg_iv']:.1%}",
+                    'Max IV': f"{alert['max_iv']:.1%}",
+                    'Affected Strikes': alert['affected_strikes'],
+                    'Total Premium': f"${alert['total_premium']:,.0f}",
+                    'Confidence': alert['confidence']
+                })
+            else:
+                # Individual spike
+                iv_data.append({
+                    'Ticker': alert['ticker'],
+                    'Strike': f"${alert['strike']:.0f}",
+                    'Type': alert['type'],
+                    'Expiry': alert['expiry'],
+                    'IV': f"{alert['iv']:.1%}",
+                    'IV Premium': f"{alert['iv_premium']:.1%}",
+                    'Trade Premium': f"${alert['premium']:,.0f}",
+                    'Side': alert['trade_side'],
+                    'Confidence': alert['confidence']
+                })
+        
+        df = pd.DataFrame(iv_data)
+        st.dataframe(df, use_container_width=True)
+    else:
+        st.info("No unusual IV spikes detected")
+    
+    # Cross-asset correlations
+    st.markdown("#### 🔗 Cross-Asset Correlations")
+    correlations = analyze_cross_asset_correlation(trades)
+    
+    if correlations:
+        corr_data = []
+        for corr in correlations[:8]:  # Show top 8 correlations
+            if corr['correlation_type'] == 'Sector Flow Concentration':
+                corr_data.append({
+                    'Type': corr['correlation_type'],
+                    'Sector': corr['sector'],
+                    'Tickers': ', '.join(corr['tickers']),
+                    'Total Premium': f"${corr['total_premium']:,.0f}",
+                    'Call Ratio': f"{corr['call_ratio']:.1%}",
+                    'Sentiment': corr['sentiment'],
+                    'Trade Count': corr['trade_count'],
+                    'Confidence': corr['confidence']
+                })
+            elif corr['correlation_type'] == 'Pair Trading Pattern':
+                corr_data.append({
+                    'Type': corr['correlation_type'],
+                    'Pair': f"{corr['ticker1']}/{corr['ticker2']}",
+                    'Sentiment 1': corr['ticker1_sentiment'],
+                    'Sentiment 2': corr['ticker2_sentiment'],
+                    'Combined Premium': f"${corr['combined_premium']:,.0f}",
+                    'Confidence': corr['confidence']
+                })
+        
+        df = pd.DataFrame(corr_data)
+        st.dataframe(df, use_container_width=True)
+    else:
+        st.info("No significant cross-asset correlations detected")
+
 def display_main_trades_table(trades, title="📋 Main Trades Analysis"):
     st.markdown(f"### {title}")
     
@@ -1136,7 +1624,7 @@ def save_to_csv(trades, filename_prefix):
 # --- STREAMLIT UI ---
 st.set_page_config(page_title="Enhanced Options Flow Tracker", page_icon="📊", layout="wide")
 st.title("📊 Enhanced Options Flow Tracker")
-st.markdown("### Real-time unusual options activity with Buy/Sell identification and Open Interest analysis")
+st.markdown("### Real-time unusual options activity with Buy/Sell identification and Advanced Pattern Recognition")
 
 with st.sidebar:
     st.markdown("## 🎛️ Control Panel")
@@ -1147,7 +1635,8 @@ with st.sidebar:
             "📈 Open Interest Deep Dive", 
             "🔄 Buy/Sell Flow Analysis",
             "🚨 Enhanced Alert System",
-            "⚡ ETF Flow Scanner"
+            "⚡ ETF Flow Scanner",
+            "🎯 Pattern Recognition"  # New option
         ]
     )
     
@@ -1270,6 +1759,12 @@ if run_scan:
                     display_enhanced_alerts(trades)
                     with st.expander("💾 Export Data", expanded=False):
                         save_to_csv(trades, "enhanced_alerts")
+                
+                elif "Pattern Recognition" in scan_type:
+                    display_pattern_recognition_analysis(trades)
+                    display_main_trades_table(trades, "📋 Pattern-Based Trade Analysis")
+                    with st.expander("💾 Export Data", expanded=False):
+                        save_to_csv(trades, "pattern_analysis")
 
 else:
     st.markdown("""
@@ -1290,6 +1785,12 @@ else:
     - **Liquidity Scoring** based on OI and volume
     - **Strike Concentration Detection** 
     - **OI Change Predictions** based on volume patterns
+    
+    #### 🎯 **Enhanced Pattern Recognition** ⭐ NEW!
+    - **Multi-Leg Strategy Detection**: Identify spreads, straddles, collars
+    - **Gamma Squeeze Indicators**: Detect potential gamma ramp conditions
+    - **Unusual IV Spikes**: Alert on sudden volatility changes
+    - **Cross-Asset Correlations**: Link options flow to underlying movements
     
     #### 🎯 **Enhanced Scenario Detection**
     - **Buy vs Sell specific scenarios** (e.g., "Large OTM Call Buying" vs "Large OTM Call Writing")
@@ -1325,11 +1826,23 @@ else:
     - **0DTE spotlight** for same-day expiration trades
     - **Most active strikes** analysis by premium
     
+    #### 🎯 **Pattern Recognition** ⭐ NEW!
+    - **Multi-Leg Strategies**: Automatically detect spreads, straddles, strangles, and collars
+    - **Gamma Squeeze Detection**: Identify potential gamma ramp setups with high call buying near current price
+    - **IV Spike Analysis**: Find unusual implied volatility spikes that may indicate upcoming events
+    - **Cross-Asset Flow**: Analyze sector-wide and correlated ticker movements
+    
     ### 🎛️ **Enhanced Filtering:**
     - **Trade Side Filter**: Filter by Buy Only, Sell Only, or Aggressive trades
     - **Premium Range Filters**: From under $100K to above $1M
     - **DTE Filters**: 0DTE, Weekly, Monthly, Quarterly, LEAPS
     - **Quick Filter Buttons**: Mega Trades, 0DTE Plays
+    
+    ### 💡 **How Pattern Recognition Works:**
+    1. **Multi-Leg Detection**: Groups trades by time window and identifies complementary positions
+    2. **Gamma Analysis**: Looks for concentrated call buying near current price levels
+    3. **IV Spike Detection**: Compares individual trade IV to ticker averages
+    4. **Correlation Analysis**: Groups trades by sector and identifies coordinated movements
     
     ### 💡 **How Trade Side Detection Works:**
     1. **Bid/Ask Analysis**: Trades near ask = BUY, near bid = SELL
@@ -1344,6 +1857,7 @@ else:
     - **Liquidity Score**: Poor to Excellent based on OI and volume
     - **Vol/OI Ratio**: Key metric for position building detection
     - **Enhanced Scenarios**: More specific strategy identification
+    - **Pattern Involvement**: Whether trade is part of detected multi-leg strategies
     
     **Select your analysis type and filters, then click 'Run Enhanced Scan' to begin!**
     """)
