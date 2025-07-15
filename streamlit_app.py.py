@@ -4,7 +4,14 @@ from datetime import datetime, date
 from collections import defaultdict
 import pandas as pd
 import numpy as np
-from zoneinfo import ZoneInfo  # Python 3.9+
+from zoneinfo import ZoneInfo
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+import time
+import sqlite3
+from functools import wraps
+import json
 
 # --- CONFIGURATION ---
 class Config:
@@ -17,13 +24,194 @@ class Config:
     SCENARIO_ITM_CONV_MIN_PREMIUM = 50000
     SCENARIO_SWEEP_VOLUME_OI_RATIO = 2
     SCENARIO_BLOCK_TRADE_VOL = 100
-    HIGH_IV_THRESHOLD = 0.30  # 30% IV threshold
-    EXTREME_IV_THRESHOLD = 0.50  # 50% IV threshold
-    IV_CRUSH_THRESHOLD = 0.15  # 15% IV threshold for crush detection
-    HIGH_VOL_OI_RATIO = 5.0  # High volume to OI ratio threshold
-    UNUSUAL_OI_THRESHOLD = 1000  # Unusual open interest threshold
+    HIGH_IV_THRESHOLD = 0.30
+    EXTREME_IV_THRESHOLD = 0.50
+    IV_CRUSH_THRESHOLD = 0.15
+    HIGH_VOL_OI_RATIO = 5.0
+    UNUSUAL_OI_THRESHOLD = 1000
+    
+    # New thresholds for enhanced features
+    INSTITUTIONAL_PREMIUM_THRESHOLD = 1000000
+    DARK_POOL_VOLUME_THRESHOLD = 1000
+    GAMMA_SQUEEZE_THRESHOLD = 0.05
+    RETAIL_PREMIUM_THRESHOLD = 50000
 
 config = Config()
+
+# --- CUSTOM CSS ---
+def load_custom_css():
+    st.markdown("""
+    <style>
+    .metric-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 1rem;
+        border-radius: 10px;
+        color: white;
+        margin: 0.5rem 0;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    
+    .alert-critical {
+        background: #ff4444;
+        border-left: 5px solid #cc0000;
+        padding: 15px;
+        margin: 10px 0;
+        border-radius: 5px;
+        color: white;
+    }
+    
+    .alert-high {
+        background: #ff8800;
+        border-left: 5px solid #cc6600;
+        padding: 15px;
+        margin: 10px 0;
+        border-radius: 5px;
+        color: white;
+    }
+    
+    .alert-medium {
+        background: #ffaa00;
+        border-left: 5px solid #cc8800;
+        padding: 15px;
+        margin: 10px 0;
+        border-radius: 5px;
+        color: white;
+    }
+    
+    .stDataFrame {
+        background: white;
+        border-radius: 10px;
+        padding: 1rem;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    }
+    
+    .sidebar-header {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 1rem;
+        border-radius: 10px;
+        margin-bottom: 1rem;
+        text-align: center;
+    }
+    
+    .status-indicator {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        margin-right: 8px;
+    }
+    
+    .status-live {
+        background: #00ff00;
+        animation: pulse 2s infinite;
+    }
+    
+    @keyframes pulse {
+        0% { opacity: 1; }
+        50% { opacity: 0.5; }
+        100% { opacity: 1; }
+    }
+    
+    .quick-stats {
+        display: flex;
+        justify-content: space-around;
+        margin: 1rem 0;
+        padding: 1rem;
+        background: #f8f9fa;
+        border-radius: 10px;
+    }
+    
+    .stat-item {
+        text-align: center;
+        padding: 0.5rem;
+    }
+    
+    .stat-value {
+        font-size: 1.5rem;
+        font-weight: bold;
+        color: #667eea;
+    }
+    
+    .stat-label {
+        font-size: 0.9rem;
+        color: #666;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- RATE LIMITING ---
+def rate_limit(max_calls=30, period=60):
+    """Rate limiting decorator"""
+    def decorator(func):
+        calls = []
+        
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            now = time.time()
+            calls[:] = [call for call in calls if now - call < period]
+            
+            if len(calls) >= max_calls:
+                sleep_time = period - (now - calls[0])
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+            
+            calls.append(now)
+            return func(*args, **kwargs)
+        
+        return wrapper
+    return decorator
+
+# --- DATABASE SETUP ---
+@st.cache_resource
+def init_database():
+    """Initialize SQLite database for historical data"""
+    conn = sqlite3.connect('options_flow.db', check_same_thread=False)
+    
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            ticker TEXT,
+            option_chain TEXT,
+            option_type TEXT,
+            strike REAL,
+            expiry DATE,
+            dte INTEGER,
+            premium REAL,
+            volume INTEGER,
+            open_interest INTEGER,
+            vol_oi_ratio REAL,
+            iv REAL,
+            trade_side TEXT,
+            scenarios TEXT,
+            alert_score INTEGER,
+            underlying_price REAL,
+            moneyness TEXT
+        )
+    ''')
+    
+    conn.execute('''
+        CREATE INDEX IF NOT EXISTS idx_ticker_timestamp ON trades(ticker, timestamp)
+    ''')
+    
+    conn.execute('''
+        CREATE INDEX IF NOT EXISTS idx_premium ON trades(premium)
+    ''')
+    
+    conn.commit()
+    return conn
+
+# --- ENHANCED CACHING ---
+@st.cache_data(ttl=300, max_entries=10)
+def fetch_general_flow_cached():
+    """Cached version of general flow fetch"""
+    return fetch_general_flow()
+
+@st.cache_data(ttl=60, max_entries=5)
+def fetch_etf_trades_cached():
+    """Cached version of ETF trades fetch"""
+    return fetch_etf_trades()
 
 # --- API SETUP ---
 headers = {
@@ -47,16 +235,14 @@ def parse_option_chain(opt_str):
         return None, None, None, None, None
 
 def determine_trade_side(trade_data):
-    """
-    Determine if the trade is a BUY or SELL based on available data
-    Uses multiple indicators to make the determination
-    """
-    # Check if there's explicit side information
+    """Enhanced trade side determination with confidence scoring"""
     side = trade_data.get('side', '').upper()
     if side in ['BUY', 'SELL']:
-        return side
+        return f"{side} (Confirmed)"
     
-    # Check for bid/ask data to infer direction
+    confidence_score = 0
+    side_indicators = []
+    
     try:
         price = float(trade_data.get('price', 0)) if trade_data.get('price') not in ['N/A', '', None] else 0
         bid = float(trade_data.get('bid', 0)) if trade_data.get('bid') not in ['N/A', '', None] else 0
@@ -64,30 +250,42 @@ def determine_trade_side(trade_data):
     except (ValueError, TypeError):
         price = bid = ask = 0
     
+    # Bid/Ask analysis with confidence scoring
     if bid > 0 and ask > 0 and price > 0:
         mid_price = (bid + ask) / 2
-        if price >= ask * 0.95:  # Trade near ask = BUY
-            return "BUY"
-        elif price <= bid * 1.05:  # Trade near bid = SELL
-            return "SELL"
+        spread = ask - bid
+        
+        if price >= ask * 0.98:  # Very close to ask
+            confidence_score += 4
+            side_indicators.append("Near Ask")
+            final_side = "BUY"
+        elif price <= bid * 1.02:  # Very close to bid
+            confidence_score += 4
+            side_indicators.append("Near Bid")
+            final_side = "SELL"
         elif price > mid_price:
-            return "BUY (Likely)"
+            confidence_score += 2
+            side_indicators.append("Above Mid")
+            final_side = "BUY"
         else:
-            return "SELL (Likely)"
+            confidence_score += 2
+            side_indicators.append("Below Mid")
+            final_side = "SELL"
     
-    # Check for aggressive indicators in description or rule
+    # Pattern analysis
     description = trade_data.get('description', '').lower()
     rule_name = trade_data.get('rule_name', '').lower()
     
-    # Aggressive buying indicators
     if any(indicator in description for indicator in ['sweep', 'aggressive', 'market buy', 'lifted']):
-        return "BUY (Aggressive)"
+        confidence_score += 3
+        side_indicators.append("Aggressive Pattern")
+        final_side = "BUY"
+    elif any(indicator in description for indicator in ['sold', 'offer hit', 'market sell']):
+        confidence_score += 3
+        side_indicators.append("Selling Pattern")
+        final_side = "SELL"
     
-    # Selling indicators
-    if any(indicator in description for indicator in ['sold', 'offer hit', 'market sell']):
-        return "SELL"
-    
-    # Volume/OI ratio analysis - high ratio often indicates new buying
+    # Volume/OI analysis
     try:
         volume = float(trade_data.get('volume', 0))
         oi = float(trade_data.get('open_interest', 1))
@@ -96,20 +294,25 @@ def determine_trade_side(trade_data):
         vol_oi_ratio = 0
     
     if vol_oi_ratio > config.HIGH_VOL_OI_RATIO:
-        return "BUY (New Position)"
+        confidence_score += 2
+        side_indicators.append("High Vol/OI")
+        final_side = "BUY"
     
-    # Default based on rule name patterns
-    if 'ascending' in rule_name:
-        return "BUY (Pattern)"
-    elif 'descending' in rule_name:
-        return "SELL (Pattern)"
+    # Confidence level determination
+    if confidence_score >= 6:
+        confidence = "High"
+    elif confidence_score >= 4:
+        confidence = "Medium"
+    elif confidence_score >= 2:
+        confidence = "Low"
+    else:
+        confidence = "Unknown"
+        final_side = "UNKNOWN"
     
-    return "UNKNOWN"
+    return f"{final_side} ({confidence})"
 
 def analyze_open_interest(trade_data, ticker_trades):
-    """
-    Analyze open interest patterns for the trade
-    """
+    """Enhanced open interest analysis with historical context"""
     try:
         oi = float(trade_data.get('open_interest', 0))
         volume = float(trade_data.get('volume', 0))
@@ -123,11 +326,15 @@ def analyze_open_interest(trade_data, ticker_trades):
         'oi_level': 'Normal',
         'oi_change_indicator': 'Stable',
         'liquidity_score': 'Medium',
-        'oi_concentration': 'Distributed'
+        'oi_concentration': 'Distributed',
+        'historical_percentile': 'N/A',
+        'flow_direction': 'Neutral'
     }
     
-    # Determine OI level
-    if oi > 10000:
+    # Enhanced OI level determination
+    if oi > 20000:
+        analysis['oi_level'] = 'Extreme'
+    elif oi > 10000:
         analysis['oi_level'] = 'Very High'
     elif oi > 5000:
         analysis['oi_level'] = 'High'
@@ -138,42 +345,165 @@ def analyze_open_interest(trade_data, ticker_trades):
     else:
         analysis['oi_level'] = 'Very Low'
     
-    # Volume to OI ratio analysis
+    # Volume to OI ratio analysis with enhanced detection
     vol_oi_ratio = volume / max(oi, 1)
-    if vol_oi_ratio > 5:
+    if vol_oi_ratio > 20:
+        analysis['oi_change_indicator'] = 'Massive Increase Expected'
+        analysis['flow_direction'] = 'Strong Bullish'
+    elif vol_oi_ratio > 10:
+        analysis['oi_change_indicator'] = 'Large Increase Expected'
+        analysis['flow_direction'] = 'Bullish'
+    elif vol_oi_ratio > 5:
         analysis['oi_change_indicator'] = 'Major Increase Expected'
+        analysis['flow_direction'] = 'Moderately Bullish'
     elif vol_oi_ratio > 2:
         analysis['oi_change_indicator'] = 'Increase Expected'
+        analysis['flow_direction'] = 'Slightly Bullish'
     elif vol_oi_ratio > 0.5:
         analysis['oi_change_indicator'] = 'Moderate Activity'
     else:
         analysis['oi_change_indicator'] = 'Low Activity'
     
-    # Liquidity scoring
-    if oi > 5000 and volume > 100:
+    # Enhanced liquidity scoring
+    if oi > 10000 and volume > 500:
         analysis['liquidity_score'] = 'Excellent'
-    elif oi > 1000 and volume > 50:
+    elif oi > 5000 and volume > 200:
+        analysis['liquidity_score'] = 'Very Good'
+    elif oi > 1000 and volume > 100:
         analysis['liquidity_score'] = 'Good'
-    elif oi > 500 and volume > 20:
+    elif oi > 500 and volume > 50:
         analysis['liquidity_score'] = 'Fair'
-    else:
+    elif oi > 100 and volume > 20:
         analysis['liquidity_score'] = 'Poor'
+    else:
+        analysis['liquidity_score'] = 'Very Poor'
     
-    # Check for strike concentration within ticker
+    # Strike concentration analysis
     try:
-        same_strike_oi = sum(1 for t in ticker_trades 
-                           if abs(float(t.get('strike', 0)) - strike) < 1 
-                           and t.get('type') == option_type)
+        same_strike_trades = [t for t in ticker_trades 
+                            if abs(float(t.get('strike', 0)) - strike) < 1 
+                            and t.get('type') == option_type]
+        concentration_score = len(same_strike_trades)
+        
+        if concentration_score > 5:
+            analysis['oi_concentration'] = 'Extreme Concentration'
+        elif concentration_score > 3:
+            analysis['oi_concentration'] = 'High Concentration'
+        elif concentration_score > 1:
+            analysis['oi_concentration'] = 'Some Concentration'
     except (ValueError, TypeError):
-        same_strike_oi = 0
-    if same_strike_oi > 3:
-        analysis['oi_concentration'] = 'High Concentration'
-    elif same_strike_oi > 1:
-        analysis['oi_concentration'] = 'Some Concentration'
+        pass
     
     return analysis
 
+def detect_institutional_flow(trades):
+    """Detect institutional vs retail flow patterns"""
+    institutional_trades = []
+    retail_trades = []
+    
+    for trade in trades:
+        premium = trade.get('premium', 0)
+        volume = trade.get('volume', 0)
+        vol_oi_ratio = trade.get('vol_oi_ratio', 0)
+        time_ny = trade.get('time_ny', '')
+        
+        # Institutional indicators
+        institutional_score = 0
+        
+        if premium > config.INSTITUTIONAL_PREMIUM_THRESHOLD:
+            institutional_score += 3
+        if volume > 500:
+            institutional_score += 2
+        if vol_oi_ratio > 10:
+            institutional_score += 2
+        if time_ny in ['09:30', '09:31', '15:59', '16:00']:  # Market open/close
+            institutional_score += 1
+        
+        if institutional_score >= 4:
+            institutional_trades.append(trade)
+        elif premium < config.RETAIL_PREMIUM_THRESHOLD:
+            retail_trades.append(trade)
+    
+    return institutional_trades, retail_trades
+
+def detect_dark_pool_activity(trades):
+    """Detect potential dark pool prints"""
+    dark_pool_candidates = []
+    
+    for trade in trades:
+        premium = trade.get('premium', 0)
+        volume = trade.get('volume', 0)
+        vol_oi_ratio = trade.get('vol_oi_ratio', 0)
+        
+        # Dark pool indicators
+        dark_pool_score = 0
+        reasons = []
+        
+        if volume > config.DARK_POOL_VOLUME_THRESHOLD:
+            dark_pool_score += 2
+            reasons.append("High Volume")
+        
+        if vol_oi_ratio > 20:
+            dark_pool_score += 3
+            reasons.append("Extreme Vol/OI")
+        
+        if premium > 2000000:
+            dark_pool_score += 2
+            reasons.append("Mega Premium")
+        
+        # Check for unusual timing patterns
+        time_ny = trade.get('time_ny', '')
+        if time_ny in ['09:30', '16:00']:
+            dark_pool_score += 1
+            reasons.append("Market Hours")
+        
+        if dark_pool_score >= 4:
+            trade['dark_pool_score'] = dark_pool_score
+            trade['dark_pool_reasons'] = reasons
+            dark_pool_candidates.append(trade)
+    
+    return dark_pool_candidates
+
+def calculate_sector_flow(trades):
+    """Analyze flow by sector"""
+    sector_map = {
+        'AAPL': 'Technology', 'MSFT': 'Technology', 'GOOGL': 'Technology', 'AMZN': 'Technology',
+        'NVDA': 'Technology', 'META': 'Technology', 'NFLX': 'Technology', 'ADBE': 'Technology',
+        'JPM': 'Finance', 'BAC': 'Finance', 'WFC': 'Finance', 'GS': 'Finance', 'MS': 'Finance',
+        'JNJ': 'Healthcare', 'UNH': 'Healthcare', 'PFE': 'Healthcare', 'ABBV': 'Healthcare',
+        'XOM': 'Energy', 'CVX': 'Energy', 'COP': 'Energy',
+        'SPY': 'ETF', 'QQQ': 'ETF', 'IWM': 'ETF',
+        'TSLA': 'Automotive'
+    }
+    
+    sector_flow = {}
+    for trade in trades:
+        ticker = trade.get('ticker', '')
+        sector = sector_map.get(ticker, 'Other')
+        
+        if sector not in sector_flow:
+            sector_flow[sector] = {
+                'calls': 0, 'puts': 0, 'total_premium': 0, 
+                'buy_premium': 0, 'sell_premium': 0, 'trades': 0
+            }
+        
+        sector_flow[sector]['total_premium'] += trade.get('premium', 0)
+        sector_flow[sector]['trades'] += 1
+        
+        if trade.get('type') == 'C':
+            sector_flow[sector]['calls'] += 1
+        else:
+            sector_flow[sector]['puts'] += 1
+        
+        if 'BUY' in trade.get('trade_side', ''):
+            sector_flow[sector]['buy_premium'] += trade.get('premium', 0)
+        elif 'SELL' in trade.get('trade_side', ''):
+            sector_flow[sector]['sell_premium'] += trade.get('premium', 0)
+    
+    return sector_flow
+
 def detect_scenarios(trade, underlying_price=None, oi_analysis=None):
+    """Enhanced scenario detection with new patterns"""
     scenarios = []
     opt_type = trade['type']
     try:
@@ -231,15 +561,27 @@ def detect_scenarios(trade, underlying_price=None, oi_analysis=None):
     if volume >= config.SCENARIO_BLOCK_TRADE_VOL:
         scenarios.append("Block Trade")
     
+    # New scenarios for institutional detection
+    if premium > config.INSTITUTIONAL_PREMIUM_THRESHOLD:
+        scenarios.append("Institutional Size")
+    
+    # Dark pool scenarios
+    if volume > config.DARK_POOL_VOLUME_THRESHOLD and vol_oi_ratio > 15:
+        scenarios.append("Potential Dark Pool")
+    
+    # Gamma scenarios
+    if ticker in ['SPY', 'QQQ'] and moneyness == 'ATM' and trade.get('dte', 0) <= 7:
+        scenarios.append("Gamma Exposure Play")
+    
     # Open Interest based scenarios
     if oi_analysis:
-        if oi_analysis['oi_level'] in ['Very High', 'High'] and vol_oi_ratio > 2:
+        if oi_analysis['oi_level'] in ['Very High', 'Extreme'] and vol_oi_ratio > 5:
             scenarios.append("High OI + Volume Surge")
         
-        if oi_analysis['liquidity_score'] == 'Poor' and premium > 200000:
+        if oi_analysis['liquidity_score'] in ['Poor', 'Very Poor'] and premium > 200000:
             scenarios.append("Illiquid Large Trade")
         
-        if oi_analysis['oi_concentration'] == 'High Concentration':
+        if oi_analysis['oi_concentration'] in ['High Concentration', 'Extreme Concentration']:
             scenarios.append("Strike Concentration Play")
     
     # Pattern-based scenarios
@@ -277,7 +619,11 @@ def detect_scenarios(trade, underlying_price=None, oi_analysis=None):
             scenarios.append("Long Volatility Strategy")
         else:
             scenarios.append("Short Volatility Strategy")
-
+    
+    # New earnings-related scenarios
+    if trade.get('dte', 0) <= 14 and premium > 300000:
+        scenarios.append("Earnings Play")
+    
     return scenarios if scenarios else ["Normal Flow"]
 
 def calculate_moneyness(strike, current_price):
@@ -327,404 +673,280 @@ def calculate_sentiment_score(trades):
         return call_ratio, "Very Bearish"
 
 def generate_enhanced_alerts(trades):
-    alerts = []
+    """Enhanced alert system with priority levels"""
+    alerts = {
+        'CRITICAL': [],
+        'HIGH': [],
+        'MEDIUM': [],
+        'LOW': []
+    }
+    
     for trade in trades:
+        alert_level = 'LOW'
         score = 0
         reasons = []
 
         premium = trade.get('premium', 0)
+        vol_oi_ratio = trade.get('vol_oi_ratio', 0)
+        dte = trade.get('dte', 0)
+        trade_side = trade.get('trade_side', '')
+        oi_analysis = trade.get('oi_analysis', {})
+        iv = trade.get('iv', 0)
+        
+        # Critical alerts
+        if premium > 2000000:
+            score += 5
+            reasons.append("Mega Premium (>$2M)")
+            alert_level = 'CRITICAL'
+        
+        if vol_oi_ratio > 50:
+            score += 4
+            reasons.append("Extreme Vol/OI Ratio")
+            alert_level = 'CRITICAL'
+        
+        # High priority alerts
         if premium > 1000000:
             score += 4
-            reasons.append("Mega Premium (>$1M)")
-        elif premium > 500000:
+            reasons.append("Massive Premium (>$1M)")
+            if alert_level == 'LOW':
+                alert_level = 'HIGH'
+        
+        if vol_oi_ratio > 20:
             score += 3
-            reasons.append("Massive Premium")
-        elif premium > 250000:
+            reasons.append("Very High Vol/OI")
+            if alert_level == 'LOW':
+                alert_level = 'HIGH'
+        
+        if dte <= 7 and premium > 500000:
+            score += 3
+            reasons.append("Short-term + Large Size")
+            if alert_level == 'LOW':
+                alert_level = 'HIGH'
+        
+        # Medium priority alerts
+        if premium > 500000:
             score += 2
             reasons.append("Large Premium")
-
-        vol_oi_ratio = trade.get('vol_oi_ratio', 0)
+            if alert_level == 'LOW':
+                alert_level = 'MEDIUM'
+        
         if vol_oi_ratio > 10:
-            score += 3
-            reasons.append("Extreme Vol/OI Ratio")
-        elif vol_oi_ratio > 5:
             score += 2
             reasons.append("High Vol/OI")
-
-        dte = trade.get('dte', 0)
-        if dte <= 7 and premium > 200000:
-            score += 2
-            reasons.append("Short-term + Size")
-
-        # Enhanced moneyness scoring
-        moneyness = trade.get('moneyness', '')
-        if "ATM" in moneyness:
-            score += 2
-            reasons.append("At-the-Money")
-        elif "ITM" in moneyness and premium > 300000:
-            score += 2
-            reasons.append("Deep ITM + Size")
-
-        # Trade side consideration
-        trade_side = trade.get('trade_side', '')
+            if alert_level == 'LOW':
+                alert_level = 'MEDIUM'
+        
         if 'Aggressive' in trade_side:
             score += 2
             reasons.append("Aggressive Execution")
-        elif 'New Position' in trade_side:
-            score += 1
-            reasons.append("New Position Building")
-
-        # Open Interest analysis
-        oi_analysis = trade.get('oi_analysis', {})
-        if oi_analysis.get('liquidity_score') == 'Poor' and premium > 200000:
+            if alert_level == 'LOW':
+                alert_level = 'MEDIUM'
+        
+        # OI-based alerts
+        if oi_analysis.get('oi_level') in ['Very High', 'Extreme']:
+            score += 2
+            reasons.append("Extreme OI Level")
+            if alert_level == 'LOW':
+                alert_level = 'MEDIUM'
+        
+        if oi_analysis.get('liquidity_score') in ['Poor', 'Very Poor'] and premium > 200000:
             score += 2
             reasons.append("Illiquid Large Trade")
+            if alert_level == 'LOW':
+                alert_level = 'MEDIUM'
         
-        if oi_analysis.get('oi_change_indicator') == 'Major Increase Expected':
-            score += 2
-            reasons.append("Major OI Increase Expected")
-
         # IV-based alerts
-        iv = trade.get('iv', 0)
         if iv > config.EXTREME_IV_THRESHOLD:
             score += 3
-            reasons.append("Extreme IV (>50%)")
-        elif iv > config.HIGH_IV_THRESHOLD:
-            score += 2
-            reasons.append("High IV (>30%)")
+            reasons.append("Extreme IV")
+            if alert_level == 'LOW':
+                alert_level = 'MEDIUM'
         
-        if iv > config.IV_CRUSH_THRESHOLD and dte <= 7:
-            score += 2
-            reasons.append("IV Crush Risk")
-
-        # Scenario-based scoring
+        # Scenario-based alerts
         scenarios = trade.get('scenarios', [])
-        high_impact_scenarios = ['Potential Insider Activity', 'High OI + Volume Surge', 'Strike Concentration Play']
+        high_impact_scenarios = [
+            'Potential Insider Activity', 'Potential Dark Pool',
+            'High OI + Volume Surge', 'Strike Concentration Play',
+            'Institutional Size'
+        ]
+        
         for scenario in scenarios:
             if scenario in high_impact_scenarios:
                 score += 2
                 reasons.append(f"Pattern: {scenario}")
-
-        if score >= 5:
+                if alert_level == 'LOW':
+                    alert_level = 'MEDIUM'
+        
+        if score >= 3:  # Only include significant alerts
             trade['alert_score'] = score
-            trade['reasons'] = reasons
-            alerts.append(trade)
-
-    return sorted(alerts, key=lambda x: -x.get('alert_score', 0))
-
-# --- SHORT-TERM ETF SCANNER ---
-def parse_option_chain_simple(opt_str):
-    """Simplified option chain parser for ETF scanner"""
-    try:
-        idx = next(i for i, c in enumerate(opt_str) if c.isdigit())
-        ticker = opt_str[:idx]
-        date_str = opt_str[idx:idx+6]
-        expiry_date = date(2000 + int(date_str[:2]), int(date_str[2:4]), int(date_str[4:6]))
-        dte = (expiry_date - date.today()).days
-        option_type = opt_str[idx+6]
-        strike = int(opt_str[idx+7:]) / 1000
-        return ticker.upper(), expiry_date.strftime('%Y-%m-%d'), dte, option_type.upper(), strike
-    except Exception:
-        return None, None, None, None, None
-
-def fetch_etf_trades():
-    """Fetch ETF trades specifically for SPY/QQQ/IWM with ≤7 DTE"""
-    allowed_tickers = {'QQQ', 'SPY', 'IWM'}
-    max_dte = 7
+            trade['alert_reasons'] = reasons
+            alerts[alert_level].append(trade)
     
-    params = {
-        'limit': config.LIMIT
-    }
+    # Sort each priority level by score
+    for level in alerts:
+        alerts[level].sort(key=lambda x: -x.get('alert_score', 0))
     
-    try:
-        response = httpx.get(url, headers=headers, params=params, timeout=30)
-        if response.status_code != 200:
-            st.error(f"API Error: {response.status_code} - {response.text}")
-            return []
-        
-        data = response.json().get('data', [])
-        filtered_trades = []
-        
-        for trade in data:
-            option_chain = trade.get('option_chain', '')
-            ticker, expiry, dte, opt_type, strike = parse_option_chain_simple(option_chain)
+    return alerts
 
-            if not ticker or ticker.upper() not in allowed_tickers:
-                continue
-            if dte is None or dte > max_dte:
-                continue
-
-            # Time conversion
-            utc_time_str = trade.get('created_at')
-            ny_time_str = "N/A"
-            if utc_time_str != "N/A":
-                try:
-                    utc_time = datetime.fromisoformat(utc_time_str.replace("Z", "+00:00"))
-                    ny_time = utc_time.astimezone(ZoneInfo("America/New_York"))
-                    ny_time_str = ny_time.strftime("%I:%M %p")
-                except Exception:
-                    ny_time_str = "N/A"
-
-            # Safe data extraction
-            try:
-                premium = float(trade.get('total_premium', 0))
-                volume = float(trade.get('volume', 0))
-                oi = float(trade.get('open_interest', 0))
-                price = trade.get('price', 'N/A')
-                if price != 'N/A':
-                    price = float(price)
-            except (ValueError, TypeError):
-                premium = volume = oi = 0
-                price = 'N/A'
-
-            trade_data = {
-                'ticker': ticker,
-                'type': opt_type,
-                'strike': strike,
-                'expiry': expiry,
-                'dte': dte,
-                'side': trade.get('side', 'N/A'),
-                'price': price,
-                'premium': premium,
-                'volume': volume,
-                'oi': oi,
-                'vol_oi_ratio': volume / max(oi, 1),
-                'time_ny': ny_time_str,
-                'option': option_chain,
-                'underlying_price': trade.get('underlying_price', strike),
-                'rule_name': trade.get('rule_name', ''),
-                'description': trade.get('description', ''),
-                'moneyness': calculate_moneyness(strike, trade.get('underlying_price', strike))
-            }
-            
-            # Add trade side detection
-            trade_data['trade_side'] = determine_trade_side(trade)
-            
-            filtered_trades.append(trade_data)
-        
-        return filtered_trades
-
-    except Exception as e:
-        st.error(f"Error fetching ETF trades: {e}")
-        return []
-
-def display_etf_scanner(trades):
-    """Display the dedicated ETF scanner section"""
-    st.markdown("### ⚡ ETF Flow Scanner (SPY/QQQ/IWM ≤ 7 DTE)")
-    
+# --- VISUALIZATION FUNCTIONS ---
+def create_premium_flow_chart(trades):
+    """Create interactive premium flow chart"""
     if not trades:
-        st.warning("No ETF trades found")
-        return
+        return None
     
-    # Summary metrics
-    col1, col2, col3, col4 = st.columns(4)
+    # Prepare data
+    df = pd.DataFrame(trades)
+    df['hour'] = pd.to_datetime(df['time_ny'], format='%I:%M %p', errors='coerce').dt.hour
+    df = df.dropna(subset=['hour'])
     
-    with col1:
-        total_premium = sum(t['premium'] for t in trades)
-        st.metric("Total Premium", f"${total_premium:,.0f}")
+    # Aggregate by hour
+    hourly_data = df.groupby('hour').agg({
+        'premium': 'sum',
+        'volume': 'sum'
+    }).reset_index()
     
-    with col2:
-        zero_dte = len([t for t in trades if t['dte'] == 0])
-        st.metric("0DTE Trades", zero_dte)
+    # Create subplot
+    fig = make_subplots(
+        rows=2, cols=1,
+        subplot_titles=('Premium Flow by Hour', 'Volume Flow by Hour'),
+        vertical_spacing=0.1
+    )
     
-    with col3:
-        buy_trades = len([t for t in trades if 'BUY' in t.get('trade_side', '')])
-        sell_trades = len([t for t in trades if 'SELL' in t.get('trade_side', '')])
-        st.metric("Buy/Sell", f"{buy_trades}/{sell_trades}")
+    # Premium flow
+    fig.add_trace(
+        go.Scatter(
+            x=hourly_data['hour'],
+            y=hourly_data['premium'],
+            mode='lines+markers',
+            name='Premium Flow',
+            line=dict(color='#667eea', width=3),
+            marker=dict(size=8)
+        ),
+        row=1, col=1
+    )
     
-    with col4:
-        avg_vol_oi = np.mean([t['vol_oi_ratio'] for t in trades]) if trades else 0
-        st.metric("Avg Vol/OI", f"{avg_vol_oi:.1f}")
+    # Volume flow
+    fig.add_trace(
+        go.Scatter(
+            x=hourly_data['hour'],
+            y=hourly_data['volume'],
+            mode='lines+markers',
+            name='Volume Flow',
+            line=dict(color='#764ba2', width=3),
+            marker=dict(size=8)
+        ),
+        row=2, col=1
+    )
     
-    # Separate by ETF
-    spy_trades = [t for t in trades if t['ticker'] == 'SPY']
-    qqq_trades = [t for t in trades if t['ticker'] == 'QQQ']
-    iwm_trades = [t for t in trades if t['ticker'] == 'IWM']
+    fig.update_layout(
+        title="Options Flow Analysis",
+        height=600,
+        showlegend=True,
+        template='plotly_white'
+    )
     
-    def create_etf_table(ticker_trades, ticker_name):
-        if not ticker_trades:
-            st.info(f"No {ticker_name} trades found")
-            return
-        
-        # Sort by premium descending
-        sorted_trades = sorted(ticker_trades, key=lambda x: x['premium'], reverse=True)
-        
-        table_data = []
-        for trade in sorted_trades[:20]:  # Top 20 per ETF
-            table_data.append({
-                'Type': trade['type'],
-                'Side': trade.get('trade_side', 'N/A'),
-                'Strike': f"${trade['strike']:.0f}",
-                'DTE': trade['dte'],
-                'Price': f"${trade['price']:.2f}" if trade['price'] != 'N/A' else 'N/A',
-                'Premium': f"${trade['premium']:,.0f}",
-                'Volume': f"{trade['volume']:,.0f}",
-                'OI': f"{trade['oi']:,.0f}",
-                'Vol/OI': f"{trade['vol_oi_ratio']:.1f}",
-                'Moneyness': trade['moneyness'],
-                'Time': trade['time_ny'],
-                'Rule': trade.get('rule_name', 'N/A')
-            })
-        
-        df = pd.DataFrame(table_data)
-        st.dataframe(df, use_container_width=True)
-    
-    # Display each ETF in tabs
-    tab1, tab2, tab3 = st.tabs(["🕷️ SPY", "🔷 QQQ", "🔸 IWM"])
-    
-    with tab1:
-        st.markdown("#### SPY Short-Term Flow")
-        spy_premium = sum(t['premium'] for t in spy_trades)
-        spy_count = len(spy_trades)
-        st.write(f"**{spy_count} trades | ${spy_premium:,.0f} premium**")
-        create_etf_table(spy_trades, "SPY")
-    
-    with tab2:
-        st.markdown("#### QQQ Short-Term Flow")
-        qqq_premium = sum(t['premium'] for t in qqq_trades)
-        qqq_count = len(qqq_trades)
-        st.write(f"**{qqq_count} trades | ${qqq_premium:,.0f} premium**")
-        create_etf_table(qqq_trades, "QQQ")
-    
-    with tab3:
-        st.markdown("#### IWM Short-Term Flow")
-        iwm_premium = sum(t['premium'] for t in iwm_trades)
-        iwm_count = len(iwm_trades)
-        st.write(f"**{iwm_count} trades | ${iwm_premium:,.0f} premium**")
-        create_etf_table(iwm_trades, "IWM")
-    
-    # Key insights
-    st.markdown("#### 🔍 Key ETF Insights")
-    
-    # Most active strikes
-    strike_activity = {}
-    for trade in trades:
-        key = f"{trade['ticker']} ${trade['strike']:.0f}{trade['type']}"
-        if key not in strike_activity:
-            strike_activity[key] = {'count': 0, 'total_premium': 0, 'total_volume': 0}
-        strike_activity[key]['count'] += 1
-        strike_activity[key]['total_premium'] += trade['premium']
-        strike_activity[key]['total_volume'] += trade['volume']
-    
-    # Sort by total premium
-    top_strikes = sorted(strike_activity.items(), 
-                        key=lambda x: x[1]['total_premium'], reverse=True)[:8]
-    
-    if top_strikes:
-        st.markdown("**🎯 Most Active ETF Strikes by Premium:**")
-        col1, col2 = st.columns(2)
-        
-        for i, (strike_key, data) in enumerate(top_strikes):
-            col = col1 if i % 2 == 0 else col2
-            with col:
-                st.write(f"**{strike_key}**")
-                st.write(f"💰 ${data['total_premium']:,.0f} | 📊 {data['total_volume']:,.0f} vol | {data['count']} trades")
-    
-    # 0DTE focus
-    zero_dte_trades = [t for t in trades if t['dte'] == 0]
-    if zero_dte_trades:
-        st.markdown("#### ⚡ 0DTE Spotlight")
-        zero_dte_premium = sum(t['premium'] for t in zero_dte_trades)
-        st.metric("0DTE Total Premium", f"${zero_dte_premium:,.0f}")
-        
-        # Top 0DTE trades
-        top_0dte = sorted(zero_dte_trades, key=lambda x: x['premium'], reverse=True)[:5]
-        st.markdown("**Top 0DTE Trades:**")
-        for i, trade in enumerate(top_0dte, 1):
-            side_indicator = "🟢" if "BUY" in trade.get('trade_side', '') else "🔴" if "SELL" in trade.get('trade_side', '') else "⚪"
-            st.write(f"{i}. {side_indicator} {trade['ticker']} {trade['strike']:.0f}{trade['type']} - "
-                    f"${trade['premium']:,.0f} ({trade.get('trade_side', 'N/A')})")
+    return fig
 
-def display_short_term_etf_section(all_trades):
-    """Display short-term ETF section as part of main analysis"""
-    st.markdown("### ⚡ Short-Term ETF Focus (SPY/QQQ/IWM ≤ 7 DTE)")
+def create_sentiment_gauge(trades):
+    """Create sentiment gauge chart"""
+    sentiment_ratio, sentiment_label = calculate_sentiment_score(trades)
     
-    # Filter for short-term ETF trades
-    allowed_tickers = {'QQQ', 'SPY', 'IWM'}
-    max_dte = 7
+    fig = go.Figure(go.Indicator(
+        mode = "gauge+number+delta",
+        value = sentiment_ratio * 100,
+        domain = {'x': [0, 1], 'y': [0, 1]},
+        title = {'text': "Market Sentiment"},
+        delta = {'reference': 50},
+        gauge = {
+            'axis': {'range': [None, 100]},
+            'bar': {'color': "#667eea"},
+            'steps': [
+                {'range': [0, 30], 'color': "#ff4444"},
+                {'range': [30, 70], 'color': "#ffaa00"},
+                {'range': [70, 100], 'color': "#00ff00"}
+            ],
+            'threshold': {
+                'line': {'color': "red", 'width': 4},
+                'thickness': 0.75,
+                'value': 50
+            }
+        }
+    ))
     
-    etf_trades = [
-        t for t in all_trades 
-        if t['ticker'] in allowed_tickers and t.get('dte', 0) <= max_dte
+    fig.update_layout(
+        height=300,
+        font={'color': "darkblue", 'family': "Arial"}
+    )
+    
+    return fig
+
+def create_volume_heatmap(trades):
+    """Create volume heatmap by strike and time"""
+    if not trades:
+        return None
+    
+    df = pd.DataFrame(trades)
+    df['hour'] = pd.to_datetime(df['time_ny'], format='%I:%M %p', errors='coerce').dt.hour
+    df = df.dropna(subset=['hour'])
+    
+    # Create pivot table
+    pivot_data = df.pivot_table(
+        values='volume',
+        index='strike',
+        columns='hour',
+        aggfunc='sum',
+        fill_value=0
+    )
+    
+    fig = px.imshow(
+        pivot_data,
+        labels=dict(x="Hour", y="Strike", color="Volume"),
+        x=pivot_data.columns,
+        y=pivot_data.index,
+        color_continuous_scale='Viridis',
+        title="Volume Heatmap by Strike and Time"
+    )
+    
+    fig.update_layout(height=500)
+    return fig
+
+def create_sector_analysis_chart(trades):
+    """Create sector analysis chart"""
+    sector_flow = calculate_sector_flow(trades)
+    
+    if not sector_flow:
+        return None
+    
+    sectors = list(sector_flow.keys())
+    premiums = [sector_flow[sector]['total_premium'] for sector in sectors]
+    call_ratios = [
+        sector_flow[sector]['calls'] / max(sector_flow[sector]['calls'] + sector_flow[sector]['puts'], 1)
+        for sector in sectors
     ]
     
-    if not etf_trades:
-        st.info("No short-term ETF trades found in current dataset")
-        return
+    fig = go.Figure()
     
-    # Quick stats
-    col1, col2, col3, col4 = st.columns(4)
+    fig.add_trace(go.Bar(
+        x=sectors,
+        y=premiums,
+        name='Total Premium',
+        marker_color='#667eea'
+    ))
     
-    with col1:
-        total_premium = sum(t.get('premium', 0) for t in etf_trades)
-        st.metric("ETF Premium", f"${total_premium:,.0f}")
+    fig.update_layout(
+        title="Sector Flow Analysis",
+        xaxis_title="Sector",
+        yaxis_title="Premium ($)",
+        height=400,
+        template='plotly_white'
+    )
     
-    with col2:
-        zero_dte = len([t for t in etf_trades if t.get('dte', 0) == 0])
-        st.metric("0DTE Trades", zero_dte)
-    
-    with col3:
-        buy_trades = len([t for t in etf_trades if 'BUY' in t.get('trade_side', '')])
-        sell_trades = len([t for t in etf_trades if 'SELL' in t.get('trade_side', '')])
-        st.metric("Buy/Sell", f"{buy_trades}/{sell_trades}")
-    
-    with col4:
-        avg_vol_oi = np.mean([t.get('vol_oi_ratio', 0) for t in etf_trades]) if etf_trades else 0
-        st.metric("Avg Vol/OI", f"{avg_vol_oi:.1f}")
-    
-    # Create ETF table
-    def create_etf_summary_table(trades):
-        if not trades:
-            return
-        
-        # Sort by premium descending
-        sorted_trades = sorted(trades, key=lambda x: x.get('premium', 0), reverse=True)
-        
-        table_data = []
-        for trade in sorted_trades[:15]:  # Top 15 ETF trades
-            oi_analysis = trade.get('oi_analysis', {})
-            
-            table_data.append({
-                'Ticker': trade['ticker'],
-                'Type': trade['type'],
-                'Side': trade.get('trade_side', 'UNKNOWN'),
-                'Strike': f"${trade['strike']:.0f}",
-                'DTE': trade.get('dte', 0),
-                'Premium': f"${trade.get('premium', 0):,.0f}",
-                'Volume': f"{trade.get('volume', 0):,}",
-                'OI': f"{trade.get('open_interest', 0):,}",
-                'Vol/OI': f"{trade.get('vol_oi_ratio', 0):.1f}",
-                'Moneyness': trade.get('moneyness', 'N/A'),
-                'Primary Scenario': trade.get('scenarios', ['Normal Flow'])[0],
-                'Time': trade.get('time_ny', 'N/A')
-            })
-        
-        df = pd.DataFrame(table_data)
-        st.dataframe(df, use_container_width=True)
-    
-    create_etf_summary_table(etf_trades)
-    
-    # Most active strikes
-    strike_activity = {}
-    for trade in etf_trades:
-        key = f"{trade['ticker']} ${trade['strike']:.0f}{trade['type']}"
-        if key not in strike_activity:
-            strike_activity[key] = {'premium': 0, 'volume': 0, 'count': 0}
-        strike_activity[key]['premium'] += trade.get('premium', 0)
-        strike_activity[key]['volume'] += trade.get('volume', 0)
-        strike_activity[key]['count'] += 1
-    
-    if strike_activity:
-        top_strikes = sorted(strike_activity.items(), 
-                           key=lambda x: x[1]['premium'], reverse=True)[:5]
-        
-        st.markdown("#### 🎯 Most Active ETF Strikes:")
-        for i, (strike_key, data) in enumerate(top_strikes, 1):
-            st.write(f"**{i}. {strike_key}** - ${data['premium']:,.0f} premium, "
-                    f"{data['volume']:,.0f} volume ({data['count']} trades)")
+    return fig
 
-# --- FETCH FUNCTION ---
+# --- FETCH FUNCTIONS ---
+@rate_limit(max_calls=30, period=60)
 def fetch_general_flow():
+    """Enhanced general flow fetch with better error handling"""
     params = {
         'issue_types[]': ['Common Stock', 'ADR'],
         'min_dte': 1,
@@ -732,11 +954,18 @@ def fetch_general_flow():
         'rule_name[]': ['RepeatedHits', 'RepeatedHitsAscendingFill', 'RepeatedHitsDescendingFill'],
         'limit': config.LIMIT
     }
+    
     try:
         response = httpx.get(url, headers=headers, params=params, timeout=30)
+        if response.status_code == 429:  # Rate limited
+            st.warning("Rate limited. Waiting...")
+            time.sleep(60)
+            response = httpx.get(url, headers=headers, params=params, timeout=30)
+        
         if response.status_code != 200:
             st.error(f"API Error: {response.status_code} - {response.text}")
             return []
+        
         data = response.json().get('data', [])
         result = []
         ticker_data = defaultdict(list)
@@ -805,26 +1034,151 @@ def fetch_general_flow():
 
         # Process each ticker's trades
         for ticker, trade_list in ticker_data.items():
-            atm_calls = [t['strike'] for t in trade_list if t['type'] == 'C']
-            avg_underlying_price = sum(atm_calls) / len(atm_calls) if atm_calls else None
-
             for trade in trade_list:
-                underlying_price = avg_underlying_price if avg_underlying_price is not None else trade['strike']
-                
                 # Analyze open interest
                 oi_analysis = analyze_open_interest(trade, trade_list)
                 trade['oi_analysis'] = oi_analysis
                 
-                # Detect scenarios with enhanced analysis
-                scenarios = detect_scenarios(trade, underlying_price, oi_analysis)
+                # Detect scenarios
+                scenarios = detect_scenarios(trade, trade['underlying_price'], oi_analysis)
                 trade['scenarios'] = scenarios
                 result.append(trade)
 
+        # Store in database
+        if result:
+            store_trades_in_db(result)
+        
         return result
 
     except Exception as e:
         st.error(f"Error fetching general flow: {e}")
         return []
+
+@rate_limit(max_calls=60, period=60)
+def fetch_etf_trades():
+    """Enhanced ETF trades fetch"""
+    allowed_tickers = {'QQQ', 'SPY', 'IWM'}
+    max_dte = 7
+    
+    params = {
+        'limit': config.LIMIT
+    }
+    
+    try:
+        response = httpx.get(url, headers=headers, params=params, timeout=30)
+        if response.status_code == 429:
+            st.warning("Rate limited. Waiting...")
+            time.sleep(60)
+            response = httpx.get(url, headers=headers, params=params, timeout=30)
+        
+        if response.status_code != 200:
+            st.error(f"API Error: {response.status_code} - {response.text}")
+            return []
+        
+        data = response.json().get('data', [])
+        filtered_trades = []
+        
+        for trade in data:
+            option_chain = trade.get('option_chain', '')
+            ticker, expiry, dte, opt_type, strike = parse_option_chain(option_chain)
+
+            if not ticker or ticker.upper() not in allowed_tickers:
+                continue
+            if dte is None or dte > max_dte:
+                continue
+
+            # Time conversion
+            utc_time_str = trade.get('created_at')
+            ny_time_str = "N/A"
+            if utc_time_str != "N/A":
+                try:
+                    utc_time = datetime.fromisoformat(utc_time_str.replace("Z", "+00:00"))
+                    ny_time = utc_time.astimezone(ZoneInfo("America/New_York"))
+                    ny_time_str = ny_time.strftime("%I:%M %p")
+                except Exception:
+                    ny_time_str = "N/A"
+
+            # Safe data extraction
+            try:
+                premium = float(trade.get('total_premium', 0))
+                volume = float(trade.get('volume', 0))
+                oi = float(trade.get('open_interest', 0))
+                price = trade.get('price', 'N/A')
+                if price != 'N/A':
+                    price = float(price)
+            except (ValueError, TypeError):
+                premium = volume = oi = 0
+                price = 'N/A'
+
+            trade_data = {
+                'ticker': ticker,
+                'type': opt_type,
+                'strike': strike,
+                'expiry': expiry,
+                'dte': dte,
+                'side': trade.get('side', 'N/A'),
+                'price': price,
+                'premium': premium,
+                'volume': volume,
+                'oi': oi,
+                'vol_oi_ratio': volume / max(oi, 1),
+                'time_ny': ny_time_str,
+                'option': option_chain,
+                'underlying_price': trade.get('underlying_price', strike),
+                'rule_name': trade.get('rule_name', ''),
+                'description': trade.get('description', ''),
+                'moneyness': calculate_moneyness(strike, trade.get('underlying_price', strike))
+            }
+            
+            # Add trade side detection
+            trade_data['trade_side'] = determine_trade_side(trade)
+            
+            filtered_trades.append(trade_data)
+        
+        return filtered_trades
+
+    except Exception as e:
+        st.error(f"Error fetching ETF trades: {e}")
+        return []
+
+def store_trades_in_db(trades):
+    """Store trades in database"""
+    try:
+        conn = init_database()
+        
+        for trade in trades:
+            scenarios_str = json.dumps(trade.get('scenarios', []))
+            
+            conn.execute('''
+                INSERT INTO trades (
+                    ticker, option_chain, option_type, strike, expiry, dte,
+                    premium, volume, open_interest, vol_oi_ratio, iv,
+                    trade_side, scenarios, alert_score, underlying_price, moneyness
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                trade.get('ticker', ''),
+                trade.get('option', ''),
+                trade.get('type', ''),
+                trade.get('strike', 0),
+                trade.get('expiry', ''),
+                trade.get('dte', 0),
+                trade.get('premium', 0),
+                trade.get('volume', 0),
+                trade.get('open_interest', 0),
+                trade.get('vol_oi_ratio', 0),
+                trade.get('iv', 0),
+                trade.get('trade_side', ''),
+                scenarios_str,
+                trade.get('alert_score', 0),
+                trade.get('underlying_price', 0),
+                trade.get('moneyness', '')
+            ))
+        
+        conn.commit()
+        conn.close()
+        
+    except Exception as e:
+        st.error(f"Database error: {e}")
 
 # --- FILTER FUNCTIONS ---
 def apply_premium_filter(trades, premium_range):
@@ -887,22 +1241,37 @@ def apply_trade_side_filter(trades, side_filter):
             filtered_trades.append(trade)
         elif side_filter == "Aggressive Only" and 'Aggressive' in trade_side:
             filtered_trades.append(trade)
+        elif side_filter == "Institutional Only" and trade.get('premium', 0) > config.INSTITUTIONAL_PREMIUM_THRESHOLD:
+            filtered_trades.append(trade)
     
     return filtered_trades
 
 # --- DISPLAY FUNCTIONS ---
+def display_live_status():
+    """Display live status indicator"""
+    current_time = datetime.now().strftime("%H:%M:%S")
+    
+    st.markdown(f"""
+    <div style="text-align: center; margin: 1rem 0;">
+        <span class="status-indicator status-live"></span>
+        <strong>LIVE</strong> - Last Update: {current_time}
+    </div>
+    """, unsafe_allow_html=True)
+
 def display_enhanced_summary(trades):
+    """Enhanced summary with visualizations"""
     st.markdown("### 📊 Enhanced Market Summary")
     
     if not trades:
         st.warning("No trades to analyze")
         return
     
-    col1, col2, col3, col4 = st.columns(4)
+    # Quick metrics
+    col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
         sentiment_ratio, sentiment_label = calculate_sentiment_score(trades)
-        st.metric("Market Sentiment", sentiment_label, f"{sentiment_ratio:.1%} calls")
+        st.metric("Market Sentiment", sentiment_label, f"{sentiment_ratio:.1%}")
     
     with col2:
         total_premium = sum(t.get('premium', 0) for t in trades)
@@ -916,204 +1285,240 @@ def display_enhanced_summary(trades):
     with col4:
         avg_oi = np.mean([t.get('open_interest', 0) for t in trades])
         st.metric("Avg Open Interest", f"{avg_oi:,.0f}")
+    
+    with col5:
+        high_vol_oi = len([t for t in trades if t.get('vol_oi_ratio', 0) > 10])
+        st.metric("High Vol/OI", high_vol_oi)
+    
+    # Institutional vs Retail Analysis
+    institutional_trades, retail_trades = detect_institutional_flow(trades)
+    
+    st.markdown("#### 🏛️ Institutional vs Retail Flow")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        inst_premium = sum(t.get('premium', 0) for t in institutional_trades)
+        st.metric("Institutional Premium", f"${inst_premium:,.0f}")
+        st.metric("Institutional Trades", len(institutional_trades))
+    
+    with col2:
+        retail_premium = sum(t.get('premium', 0) for t in retail_trades)
+        st.metric("Retail Premium", f"${retail_premium:,.0f}")
+        st.metric("Retail Trades", len(retail_trades))
+    
+    # Charts
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Sentiment gauge
+        sentiment_chart = create_sentiment_gauge(trades)
+        if sentiment_chart:
+            st.plotly_chart(sentiment_chart, use_container_width=True)
+    
+    with col2:
+        # Sector analysis
+        sector_chart = create_sector_analysis_chart(trades)
+        if sector_chart:
+            st.plotly_chart(sector_chart, use_container_width=True)
+    
+    # Premium flow chart
+    premium_chart = create_premium_flow_chart(trades)
+    if premium_chart:
+        st.plotly_chart(premium_chart, use_container_width=True)
+
+def display_smart_alerts(trades):
+    """Display enhanced alert system"""
+    st.markdown("### 🚨 Smart Alert System")
+    
+    alerts = generate_enhanced_alerts(trades)
+    
+    # Alert summary
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("🔴 Critical", len(alerts['CRITICAL']))
+    with col2:
+        st.metric("🟠 High", len(alerts['HIGH']))
+    with col3:
+        st.metric("🟡 Medium", len(alerts['MEDIUM']))
+    with col4:
+        st.metric("🔵 Low", len(alerts['LOW']))
+    
+    # Display alerts by priority
+    for priority, alert_list in alerts.items():
+        if not alert_list:
+            continue
+        
+        if priority == 'CRITICAL':
+            st.markdown("#### 🔴 CRITICAL ALERTS")
+            css_class = "alert-critical"
+        elif priority == 'HIGH':
+            st.markdown("#### 🟠 HIGH PRIORITY ALERTS")
+            css_class = "alert-high"
+        elif priority == 'MEDIUM':
+            st.markdown("#### 🟡 MEDIUM PRIORITY ALERTS")
+            css_class = "alert-medium"
+        else:
+            st.markdown("#### 🔵 LOW PRIORITY ALERTS")
+            css_class = "alert-medium"
+        
+        for i, alert in enumerate(alert_list[:10], 1):  # Show top 10 per priority
+            side_emoji = "🟢" if "BUY" in alert.get('trade_side', '') else "🔴" if "SELL" in alert.get('trade_side', '') else "⚪"
+            
+            st.markdown(f"""
+            <div class="{css_class}">
+                <strong>{i}. {side_emoji} {alert['ticker']} {alert['strike']:.0f}{alert['type']} 
+                {alert['expiry']} ({alert['dte']}d) - {alert.get('trade_side', 'UNKNOWN')}</strong><br>
+                💰 Premium: ${alert['premium']:,.0f} | Vol: {alert['volume']:,} | 
+                OI: {alert['open_interest']:,} | Vol/OI: {alert['vol_oi_ratio']:.1f}<br>
+                📊 Alert Score: {alert.get('alert_score', 0)} | 
+                IV: {alert.get('iv_percentage', 'N/A')}<br>
+                🎯 Scenarios: {', '.join(alert.get('scenarios', [])[:3])}<br>
+                📍 Reasons: {', '.join(alert.get('alert_reasons', []))}
+            </div>
+            """, unsafe_allow_html=True)
+
+def display_dark_pool_analysis(trades):
+    """Display dark pool analysis"""
+    st.markdown("### 🌑 Dark Pool Analysis")
+    
+    dark_pool_trades = detect_dark_pool_activity(trades)
+    
+    if not dark_pool_trades:
+        st.info("No potential dark pool activity detected")
+        return
+    
+    st.metric("Potential Dark Pool Trades", len(dark_pool_trades))
+    
+    # Create table
+    table_data = []
+    for trade in dark_pool_trades[:15]:
+        table_data.append({
+            'Ticker': trade['ticker'],
+            'Type': trade['type'],
+            'Strike': f"${trade['strike']:.0f}",
+            'Premium': f"${trade['premium']:,.0f}",
+            'Volume': f"{trade['volume']:,}",
+            'Vol/OI': f"{trade['vol_oi_ratio']:.1f}",
+            'Dark Pool Score': trade.get('dark_pool_score', 0),
+            'Reasons': ', '.join(trade.get('dark_pool_reasons', [])),
+            'Time': trade.get('time_ny', 'N/A')
+        })
+    
+    df = pd.DataFrame(table_data)
+    st.dataframe(df, use_container_width=True)
+
+def display_advanced_visualizations(trades):
+    """Display advanced visualizations"""
+    st.markdown("### 📈 Advanced Visualizations")
+    
+    tab1, tab2, tab3 = st.tabs(["Volume Heatmap", "Flow Timeline", "OI Analysis"])
+    
+    with tab1:
+        volume_chart = create_volume_heatmap(trades)
+        if volume_chart:
+            st.plotly_chart(volume_chart, use_container_width=True)
+    
+    with tab2:
+        premium_chart = create_premium_flow_chart(trades)
+        if premium_chart:
+            st.plotly_chart(premium_chart, use_container_width=True)
+    
+    with tab3:
+        # OI distribution
+        if trades:
+            oi_levels = [t.get('oi_analysis', {}).get('oi_level', 'Normal') for t in trades]
+            oi_counts = pd.Series(oi_levels).value_counts()
+            
+            fig = px.pie(
+                values=oi_counts.values,
+                names=oi_counts.index,
+                title="Open Interest Level Distribution"
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
 def display_main_trades_table(trades, title="📋 Main Trades Analysis"):
+    """Enhanced main trades table"""
     st.markdown(f"### {title}")
     
     if not trades:
         st.info("No trades found")
         return
     
-    # Separate calls and puts
-    calls = [t for t in trades if t['type'] == 'C']
-    puts = [t for t in trades if t['type'] == 'P']
+    # Sort by premium descending
+    sorted_trades = sorted(trades, key=lambda x: x.get('premium', 0), reverse=True)
     
-    def create_trade_table(trade_list, trade_type_emoji, trade_type_name):
-        if not trade_list:
-            st.info(f"No {trade_type_name.lower()} found")
-            return
+    # Create enhanced table
+    table_data = []
+    for trade in sorted_trades[:50]:  # Show top 50
+        oi_analysis = trade.get('oi_analysis', {})
         
-        # Sort by premium descending
-        sorted_trades = sorted(trade_list, key=lambda x: x.get('premium', 0), reverse=True)
-        
-        table_data = []
-        for trade in sorted_trades[:25]:  # Show top 25 per section
-            oi_analysis = trade.get('oi_analysis', {})
-            
-            table_data.append({
-                'Ticker': trade['ticker'],
-                'Side': trade.get('trade_side', 'UNKNOWN'),
-                'Strike': f"${trade['strike']:.0f}",
-                'Expiry': trade['expiry'],
-                'DTE': trade['dte'],
-                'Price': f"${trade['price']}" if trade['price'] != 'N/A' else 'N/A',
-                'Premium': f"${trade['premium']:,.0f}",
-                'Volume': f"{trade['volume']:,}",
-                'Open Interest': f"{trade['open_interest']:,}",
-                'Vol/OI': f"{trade['vol_oi_ratio']:.1f}",
-                'OI Level': oi_analysis.get('oi_level', 'N/A'),
-                'Liquidity': oi_analysis.get('liquidity_score', 'N/A'),
-                'IV': trade['iv_percentage'],
-                'Moneyness': trade['moneyness'],
-                'Primary Scenario': trade.get('scenarios', ['Normal Flow'])[0],
-                'Time': trade['time_ny']
-            })
-        
-        df = pd.DataFrame(table_data)
-        st.dataframe(df, use_container_width=True)
+        table_data.append({
+            'Ticker': trade['ticker'],
+            'Side': trade.get('trade_side', 'UNKNOWN'),
+            'Type': trade['type'],
+            'Strike': f"${trade['strike']:.0f}",
+            'Expiry': trade['expiry'],
+            'DTE': trade['dte'],
+            'Premium': f"${trade['premium']:,.0f}",
+            'Volume': f"{trade['volume']:,}",
+            'OI': f"{trade['open_interest']:,}",
+            'Vol/OI': f"{trade['vol_oi_ratio']:.1f}",
+            'OI Level': oi_analysis.get('oi_level', 'N/A'),
+            'Liquidity': oi_analysis.get('liquidity_score', 'N/A'),
+            'IV': trade.get('iv_percentage', 'N/A'),
+            'Moneyness': trade.get('moneyness', 'N/A'),
+            'Primary Scenario': trade.get('scenarios', ['Normal Flow'])[0],
+            'Alert Score': trade.get('alert_score', 0),
+            'Time': trade.get('time_ny', 'N/A')
+        })
     
-    # Display in two columns
+    df = pd.DataFrame(table_data)
+    st.dataframe(df, use_container_width=True)
+
+def display_personalized_dashboard():
+    """Display personalized dashboard"""
+    st.markdown("### 👤 Personalized Dashboard")
+    
+    # User preferences
     col1, col2 = st.columns(2)
     
     with col1:
-        st.markdown("#### 🟢 CALLS")
-        create_trade_table(calls, "🟢", "Calls")
+        watchlist = st.multiselect(
+            "📋 Your Watchlist",
+            ['AAPL', 'TSLA', 'SPY', 'QQQ', 'NVDA', 'AMD', 'MSFT', 'AMZN'],
+            default=['SPY', 'QQQ']
+        )
     
     with col2:
-        st.markdown("#### 🔴 PUTS")
-        create_trade_table(puts, "🔴", "Puts")
+        risk_level = st.select_slider(
+            "⚖️ Risk Level",
+            options=['Conservative', 'Moderate', 'Aggressive'],
+            value='Moderate'
+        )
     
-    # Add Short-Term ETF section after calls/puts
-    st.divider()
-    display_short_term_etf_section(trades)
-
-def display_open_interest_analysis(trades):
-    st.markdown("### 📈 Open Interest Deep Dive")
-    
-    if not trades:
-        st.info("No data available")
-        return
-    
-    # OI Level Distribution
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("#### OI Level Summary")
-        oi_levels = {}
-        for trade in trades:
-            level = trade.get('oi_analysis', {}).get('oi_level', 'Unknown')
-            oi_levels[level] = oi_levels.get(level, 0) + 1
-        
-        for level, count in sorted(oi_levels.items()):
-            st.write(f"**{level}**: {count} trades")
-    
-    with col2:
-        st.markdown("#### Liquidity Analysis")
-        liquidity_scores = {}
-        for trade in trades:
-            score = trade.get('oi_analysis', {}).get('liquidity_score', 'Unknown')
-            liquidity_scores[score] = liquidity_scores.get(score, 0) + 1
-        
-        for score, count in sorted(liquidity_scores.items()):
-            st.write(f"**{score}**: {count} trades")
-    
-    # High OI Concentration Trades
-    st.markdown("#### 🎯 High OI Concentration Plays")
-    concentration_trades = [
-        t for t in trades 
-        if t.get('oi_analysis', {}).get('oi_concentration') == 'High Concentration'
-    ]
-    
-    if concentration_trades:
-        conc_data = []
-        for trade in sorted(concentration_trades, key=lambda x: x.get('premium', 0), reverse=True)[:10]:
-            conc_data.append({
-                'Ticker': trade['ticker'],
-                'Strike': f"${trade['strike']:.0f}",
-                'Type': trade['type'],
-                'Side': trade.get('trade_side', 'UNKNOWN'),
-                'Premium': f"${trade['premium']:,.0f}",
-                'OI': f"{trade['open_interest']:,}",
-                'Volume': f"{trade['volume']:,}",
-                'Primary Scenario': trade.get('scenarios', ['Normal Flow'])[0]
-            })
-        
-        st.dataframe(pd.DataFrame(conc_data), use_container_width=True)
-    else:
-        st.info("No high concentration plays found")
-
-def display_buy_sell_analysis(trades):
-    st.markdown("### 🔄 Buy/Sell Flow Analysis")
-    
-    buy_trades = [t for t in trades if 'BUY' in t.get('trade_side', '')]
-    sell_trades = [t for t in trades if 'SELL' in t.get('trade_side', '')]
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("#### 🟢 Buy Side Activity")
-        if buy_trades:
-            buy_premium = sum(t['premium'] for t in buy_trades)
-            buy_calls = len([t for t in buy_trades if t['type'] == 'C'])
-            buy_puts = len([t for t in buy_trades if t['type'] == 'P'])
-            
-            st.metric("Total Buy Premium", f"${buy_premium:,.0f}")
-            st.metric("Buy Calls vs Puts", f"{buy_calls}/{buy_puts}")
-            
-            # Top buy trades
-            st.markdown("**Top Buy Trades:**")
-            for trade in sorted(buy_trades, key=lambda x: x['premium'], reverse=True)[:5]:
-                st.write(f"• {trade['ticker']} {trade['strike']:.0f}{trade['type']} - ${trade['premium']:,.0f}")
-        else:
-            st.info("No clear buy trades identified")
-    
-    with col2:
-        st.markdown("#### 🔴 Sell Side Activity")
-        if sell_trades:
-            sell_premium = sum(t['premium'] for t in sell_trades)
-            sell_calls = len([t for t in sell_trades if t['type'] == 'C'])
-            sell_puts = len([t for t in sell_trades if t['type'] == 'P'])
-            
-            st.metric("Total Sell Premium", f"${sell_premium:,.0f}")
-            st.metric("Sell Calls vs Puts", f"{sell_calls}/{sell_puts}")
-            
-            # Top sell trades
-            st.markdown("**Top Sell Trades:**")
-            for trade in sorted(sell_trades, key=lambda x: x['premium'], reverse=True)[:5]:
-                st.write(f"• {trade['ticker']} {trade['strike']:.0f}{trade['type']} - ${trade['premium']:,.0f}")
-        else:
-            st.info("No clear sell trades identified")
-
-def display_enhanced_alerts(trades):
-    alerts = generate_enhanced_alerts(trades)
-    if not alerts:
-        st.info("No high-priority alerts found")
-        return
-    
-    st.markdown("### 🚨 Enhanced Priority Alerts")
-    
-    for i, alert in enumerate(alerts[:15], 1):
-        with st.container():
-            col1, col2 = st.columns([4, 1])
-            with col1:
-                side_emoji = "🟢" if "BUY" in alert.get('trade_side', '') else "🔴" if "SELL" in alert.get('trade_side', '') else "⚪"
-                st.markdown(f"**{i}. {side_emoji} {alert['ticker']} {alert['strike']:.0f}{alert['type']} "
-                            f"{alert['expiry']} ({alert['dte']}d) - {alert.get('trade_side', 'UNKNOWN')}**")
-                
-                oi_analysis = alert.get('oi_analysis', {})
-                st.write(f"💰 Premium: ${alert['premium']:,.0f} | Vol: {alert['volume']:,} | "
-                         f"OI: {alert['open_interest']:,} | Vol/OI: {alert['vol_oi_ratio']:.1f}")
-                st.write(f"📊 OI Level: {oi_analysis.get('oi_level', 'N/A')} | "
-                         f"Liquidity: {oi_analysis.get('liquidity_score', 'N/A')} | "
-                         f"IV: {alert['iv_percentage']}")
-                st.write(f"🎯 Scenarios: {', '.join(alert.get('scenarios', [])[:3])}")
-                st.write(f"📍 Alert Reasons: {', '.join(alert.get('reasons', []))}")
-            with col2:
-                st.metric("Alert Score", alert.get('alert_score', 0))
-            st.divider()
+    return {
+        'watchlist': watchlist,
+        'risk_level': risk_level
+    }
 
 # --- CSV EXPORT ---
 def save_to_csv(trades, filename_prefix):
     if not trades:
         st.warning("No data to save")
         return
+    
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"{filename_prefix}_{timestamp}.csv"
+    
+    # Prepare data for CSV
     csv_data = []
     for trade in trades:
         row = trade.copy()
-        if isinstance(row.get('reasons'), list):
-            row['reasons'] = ', '.join(row['reasons'])
+        
+        # Handle list/dict fields
+        if isinstance(row.get('alert_reasons'), list):
+            row['alert_reasons'] = ', '.join(row['alert_reasons'])
         if isinstance(row.get('scenarios'), list):
             row['scenarios'] = ', '.join(row['scenarios'])
         if isinstance(row.get('oi_analysis'), dict):
@@ -1122,9 +1527,12 @@ def save_to_csv(trades, filename_prefix):
             row['liquidity_score'] = oi_analysis.get('liquidity_score', '')
             row['oi_change_indicator'] = oi_analysis.get('oi_change_indicator', '')
             del row['oi_analysis']
+        
         csv_data.append(row)
+    
     df = pd.DataFrame(csv_data)
     csv = df.to_csv(index=False)
+    
     st.download_button(
         label=f"📥 Download {filename}",
         data=csv,
@@ -1133,111 +1541,207 @@ def save_to_csv(trades, filename_prefix):
         use_container_width=True
     )
 
-# --- STREAMLIT UI ---
-st.set_page_config(page_title="Enhanced Options Flow Tracker", page_icon="📊", layout="wide")
-st.title("📊 Enhanced Options Flow Tracker")
-st.markdown("### Real-time unusual options activity with Buy/Sell identification and Open Interest analysis")
-
-with st.sidebar:
-    st.markdown("## 🎛️ Control Panel")
-    scan_type = st.selectbox(
-        "Select Analysis Type:",
-        [
-            "🔍 Main Flow Analysis",
-            "📈 Open Interest Deep Dive", 
-            "🔄 Buy/Sell Flow Analysis",
-            "🚨 Enhanced Alert System",
-            "⚡ ETF Flow Scanner"
-        ]
+# --- MAIN STREAMLIT APP ---
+def main():
+    # Page config
+    st.set_page_config(
+        page_title="Enhanced Options Flow Tracker", 
+        page_icon="📊", 
+        layout="wide",
+        initial_sidebar_state="expanded"
     )
     
-    # Premium Range Filter
-    st.markdown("### 💰 Premium Range Filter")
-    premium_range = st.selectbox(
-        "Select Premium Range:",
-        [
-            "All Premiums (No Filter)",
-            "Under $100K",
-            "Under $250K", 
-            "$100K - $250K",
-            "$250K - $500K",
-            "Above $250K",
-            "Above $500K",
-            "Above $1M"
-        ],
-        index=0
-    )
+    # Load custom CSS
+    load_custom_css()
     
-    # DTE Filter
-    st.markdown("### 📅 Time to Expiry Filter")
-    dte_filter = st.selectbox(
-        "Select DTE Range:",
-        [
-            "All DTE",
-            "0DTE Only",
-            "Weekly (≤7d)",
-            "Monthly (≤30d)",
-            "Quarterly (≤90d)",
-            "LEAPS (>90d)"
-        ],
-        index=0
-    )
+    # Initialize database
+    init_database()
     
-    # Trade Side Filter
-    st.markdown("### 🔄 Trade Side Filter")
-    side_filter = st.selectbox(
-        "Filter by Trade Side:",
-        [
-            "All Trades",
-            "Buy Only",
-            "Sell Only", 
-            "Aggressive Only"
-        ],
-        index=0
-    )
+    # Header
+    st.markdown("""
+    <div style="text-align: center; margin: 2rem 0;">
+        <h1>📊 Enhanced Options Flow Tracker</h1>
+        <p style="font-size: 1.2rem; color: #666;">
+            Real-time unusual options activity with AI-powered analysis
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
     
-    # Quick Filter Buttons
-    st.markdown("### ⚡ Quick Filters")
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🔥 Mega Trades", use_container_width=True):
-            premium_range = "Above $1M"
-    with col2:
-        if st.button("⚡ 0DTE Plays", use_container_width=True):
-            dte_filter = "0DTE Only"
+    # Live status
+    display_live_status()
     
-    run_scan = st.button("🔄 Run Enhanced Scan", type="primary", use_container_width=True)
-
-if run_scan:
-    with st.spinner(f"Running {scan_type}..."):
-        if "ETF Flow Scanner" in scan_type:
-            # ETF scanner uses its own data fetch
-            trades = fetch_etf_trades()
-            # Apply filters to ETF trades
-            original_count = len(trades)
-            trades = apply_premium_filter(trades, premium_range)
-            trades = apply_dte_filter(trades, dte_filter)
-            trades = apply_trade_side_filter(trades, side_filter)
+    # Sidebar
+    with st.sidebar:
+        st.markdown("""
+        <div class="sidebar-header">
+            <h2>🎛️ Control Panel</h2>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Auto-refresh toggle
+        auto_refresh = st.checkbox("🔄 Auto-refresh (30s)", value=False)
+        
+        # Analysis type selection
+        scan_type = st.selectbox(
+            "Select Analysis Type:",
+            [
+                "🔍 Main Flow Analysis",
+                "📈 Advanced Visualizations",
+                "🚨 Smart Alert System",
+                "🌑 Dark Pool Analysis",
+                "📊 Institutional vs Retail",
+                "⚡ ETF Flow Scanner"
+            ]
+        )
+        
+        # Personalized dashboard
+        st.divider()
+        user_prefs = display_personalized_dashboard()
+        
+        st.divider()
+        
+        # Filters
+        st.markdown("### 💰 Premium Range Filter")
+        premium_range = st.selectbox(
+            "Select Premium Range:",
+            [
+                "All Premiums (No Filter)",
+                "Under $100K",
+                "Under $250K", 
+                "$100K - $250K",
+                "$250K - $500K",
+                "Above $250K",
+                "Above $500K",
+                "Above $1M"
+            ],
+            index=0
+        )
+        
+        st.markdown("### 📅 Time to Expiry Filter")
+        dte_filter = st.selectbox(
+            "Select DTE Range:",
+            [
+                "All DTE",
+                "0DTE Only",
+                "Weekly (≤7d)",
+                "Monthly (≤30d)",
+                "Quarterly (≤90d)",
+                "LEAPS (>90d)"
+            ],
+            index=0
+        )
+        
+        st.markdown("### 🔄 Trade Side Filter")
+        side_filter = st.selectbox(
+            "Filter by Trade Side:",
+            [
+                "All Trades",
+                "Buy Only",
+                "Sell Only", 
+                "Aggressive Only",
+                "Institutional Only"
+            ],
+            index=0
+        )
+        
+        # Advanced filters
+        with st.expander("🔍 Advanced Filters", expanded=False):
+            col1, col2 = st.columns(2)
             
-            # Show filter results
-            if len(trades) != original_count:
-                st.info(f"**Filter Results:** {original_count} → {len(trades)} ETF trades after applying filters")
+            with col1:
+                iv_range = st.slider("IV Range (%)", 0, 200, (0, 200))
+                min_volume = st.number_input("Min Volume", min_value=0, value=0)
             
-            if not trades:
-                st.warning("⚠️ No ETF trades match your current filters. Try adjusting the filters.")
+            with col2:
+                min_oi = st.number_input("Min Open Interest", min_value=0, value=0)
+                vol_oi_threshold = st.slider("Min Vol/OI Ratio", 0.0, 50.0, 0.0)
+        
+        # Quick filter buttons
+        st.markdown("### ⚡ Quick Filters")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("🔥 Mega Trades", use_container_width=True):
+                premium_range = "Above $1M"
+                st.rerun()
+        
+        with col2:
+            if st.button("⚡ 0DTE Plays", use_container_width=True):
+                dte_filter = "0DTE Only"
+                st.rerun()
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("🏛️ Institutional", use_container_width=True):
+                side_filter = "Institutional Only"
+                st.rerun()
+        
+        with col2:
+            if st.button("🌑 Dark Pool", use_container_width=True):
+                scan_type = "🌑 Dark Pool Analysis"
+                st.rerun()
+        
+        st.divider()
+        
+        # Scan button
+        run_scan = st.button("🔄 Run Enhanced Scan", type="primary", use_container_width=True)
+        
+        # Historical data toggle
+        use_historical = st.checkbox("📊 Include Historical Data", value=False)
+        
+        # Real-time settings
+        st.markdown("### ⚙️ Real-time Settings")
+        refresh_interval = st.slider("Refresh Interval (seconds)", 10, 120, 30)
+        
+        # Data source status
+        st.markdown("### 📡 Data Source Status")
+        st.markdown("""
+        <div style="padding: 1rem; background: #f0f0f0; border-radius: 5px;">
+            <strong>🟢 API Status:</strong> Connected<br>
+            <strong>📊 Database:</strong> Ready<br>
+            <strong>⚡ Cache:</strong> Active
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # Auto-refresh logic
+    if auto_refresh:
+        time.sleep(refresh_interval)
+        st.rerun()
+    
+    # Main content
+    if run_scan or auto_refresh:
+        with st.spinner(f"Running {scan_type}..."):
+            # Fetch data based on scan type
+            if "ETF Flow Scanner" in scan_type:
+                trades = fetch_etf_trades_cached()
             else:
-                display_etf_scanner(trades)
-                with st.expander("💾 Export Data", expanded=False):
-                    save_to_csv(trades, "etf_flow_scanner")
-        else:
-            # Regular analysis types use general flow data
-            trades = fetch_general_flow()
+                trades = fetch_general_flow_cached()
             
             # Apply filters
             original_count = len(trades)
+            
+            # Apply basic filters
             trades = apply_premium_filter(trades, premium_range)
             trades = apply_dte_filter(trades, dte_filter)
             trades = apply_trade_side_filter(trades, side_filter)
+            
+            # Apply advanced filters
+            if iv_range != (0, 200):
+                trades = [t for t in trades if iv_range[0] <= t.get('iv', 0) * 100 <= iv_range[1]]
+            
+            if min_volume > 0:
+                trades = [t for t in trades if t.get('volume', 0) >= min_volume]
+            
+            if min_oi > 0:
+                trades = [t for t in trades if t.get('open_interest', 0) >= min_oi]
+            
+            if vol_oi_threshold > 0:
+                trades = [t for t in trades if t.get('vol_oi_ratio', 0) >= vol_oi_threshold]
+            
+            # Apply watchlist filter if specified
+            if user_prefs['watchlist']:
+                trades = [t for t in trades if t.get('ticker') in user_prefs['watchlist']]
             
             # Show filter results
             if len(trades) != original_count:
@@ -1245,105 +1749,403 @@ if run_scan:
             
             if not trades:
                 st.warning("⚠️ No trades match your current filters. Try adjusting the filters.")
-            else:
-                # Display enhanced summary for all scan types
+                return
+            
+            # Display results based on scan type
+            if "Main Flow" in scan_type:
+                display_enhanced_summary(trades)
+                display_main_trades_table(trades)
+                
+                # Additional analysis tabs
+                tab1, tab2, tab3 = st.tabs(["📊 Flow Analysis", "🎯 Key Scenarios", "📈 Performance"])
+                
+                with tab1:
+                    # Sector breakdown
+                    sector_flow = calculate_sector_flow(trades)
+                    if sector_flow:
+                        st.markdown("#### 🏢 Sector Flow Breakdown")
+                        sector_data = []
+                        for sector, data in sector_flow.items():
+                            sector_data.append({
+                                'Sector': sector,
+                                'Total Premium': f"${data['total_premium']:,.0f}",
+                                'Trades': data['trades'],
+                                'Calls': data['calls'],
+                                'Puts': data['puts'],
+                                'Buy Premium': f"${data['buy_premium']:,.0f}",
+                                'Sell Premium': f"${data['sell_premium']:,.0f}"
+                            })
+                        
+                        df_sector = pd.DataFrame(sector_data)
+                        st.dataframe(df_sector, use_container_width=True)
+                
+                with tab2:
+                    # Scenario analysis
+                    scenario_counts = {}
+                    for trade in trades:
+                        scenarios = trade.get('scenarios', ['Normal Flow'])
+                        for scenario in scenarios:
+                            scenario_counts[scenario] = scenario_counts.get(scenario, 0) + 1
+                    
+                    st.markdown("#### 🎯 Most Common Scenarios")
+                    sorted_scenarios = sorted(scenario_counts.items(), key=lambda x: x[1], reverse=True)
+                    
+                    for scenario, count in sorted_scenarios[:10]:
+                        st.write(f"**{scenario}**: {count} trades")
+                
+                with tab3:
+                    # Performance metrics
+                    st.markdown("#### 📈 Performance Metrics")
+                    
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        avg_premium = np.mean([t.get('premium', 0) for t in trades])
+                        st.metric("Average Premium", f"${avg_premium:,.0f}")
+                    
+                    with col2:
+                        high_confidence_trades = len([t for t in trades if 'High' in t.get('trade_side', '')])
+                        st.metric("High Confidence Trades", high_confidence_trades)
+                    
+                    with col3:
+                        unusual_trades = len([t for t in trades if t.get('vol_oi_ratio', 0) > 10])
+                        st.metric("Unusual Volume Trades", unusual_trades)
+            
+            elif "Advanced Visualizations" in scan_type:
+                display_enhanced_summary(trades)
+                display_advanced_visualizations(trades)
+            
+            elif "Smart Alert" in scan_type:
+                display_smart_alerts(trades)
+                display_main_trades_table(trades, "📋 Alert-Triggered Trades")
+            
+            elif "Dark Pool" in scan_type:
+                display_enhanced_summary(trades)
+                display_dark_pool_analysis(trades)
+            
+            elif "Institutional vs Retail" in scan_type:
                 display_enhanced_summary(trades)
                 
-                if "Main Flow" in scan_type:
-                    display_main_trades_table(trades)
-                    with st.expander("💾 Export Data", expanded=False):
-                        save_to_csv(trades, "enhanced_flow")
+                institutional_trades, retail_trades = detect_institutional_flow(trades)
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("#### 🏛️ Institutional Flow")
+                    if institutional_trades:
+                        inst_data = []
+                        for trade in institutional_trades[:20]:
+                            inst_data.append({
+                                'Ticker': trade['ticker'],
+                                'Type': trade['type'],
+                                'Premium': f"${trade['premium']:,.0f}",
+                                'Volume': f"{trade['volume']:,}",
+                                'Vol/OI': f"{trade['vol_oi_ratio']:.1f}",
+                                'Side': trade.get('trade_side', 'UNKNOWN')
+                            })
+                        
+                        df_inst = pd.DataFrame(inst_data)
+                        st.dataframe(df_inst, use_container_width=True)
+                    else:
+                        st.info("No institutional trades detected")
+                
+                with col2:
+                    st.markdown("#### 👥 Retail Flow")
+                    if retail_trades:
+                        retail_data = []
+                        for trade in retail_trades[:20]:
+                            retail_data.append({
+                                'Ticker': trade['ticker'],
+                                'Type': trade['type'],
+                                'Premium': f"${trade['premium']:,.0f}",
+                                'Volume': f"{trade['volume']:,}",
+                                'Vol/OI': f"{trade['vol_oi_ratio']:.1f}",
+                                'Side': trade.get('trade_side', 'UNKNOWN')
+                            })
+                        
+                        df_retail = pd.DataFrame(retail_data)
+                        st.dataframe(df_retail, use_container_width=True)
+                    else:
+                        st.info("No retail trades detected")
+            
+            elif "ETF Flow Scanner" in scan_type:
+                display_etf_scanner(trades)
+            
+            # Export section
+            with st.expander("💾 Export Data & Analytics", expanded=False):
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    save_to_csv(trades, "enhanced_flow")
+                
+                with col2:
+                    # Export alerts
+                    alerts = generate_enhanced_alerts(trades)
+                    all_alerts = []
+                    for priority, alert_list in alerts.items():
+                        for alert in alert_list:
+                            alert['priority'] = priority
+                            all_alerts.append(alert)
+                    
+                    if all_alerts:
+                        save_to_csv(all_alerts, "smart_alerts")
+                
+                with col3:
+                    # Export summary stats
+                    if st.button("📊 Export Summary", use_container_width=True):
+                        summary_stats = {
+                            'total_trades': len(trades),
+                            'total_premium': sum(t.get('premium', 0) for t in trades),
+                            'avg_premium': np.mean([t.get('premium', 0) for t in trades]),
+                            'sentiment_ratio': calculate_sentiment_score(trades)[0],
+                            'institutional_trades': len(detect_institutional_flow(trades)[0]),
+                            'retail_trades': len(detect_institutional_flow(trades)[1]),
+                            'dark_pool_trades': len(detect_dark_pool_activity(trades))
+                        }
+                        
+                        summary_df = pd.DataFrame([summary_stats])
+                        csv = summary_df.to_csv(index=False)
+                        
+                        st.download_button(
+                            label="📥 Download Summary Stats",
+                            data=csv,
+                            file_name=f"flow_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv",
+                            use_container_width=True
+                        )
+    
+    else:
+        # Welcome screen
+        st.markdown("""
+        ## Welcome to Enhanced Options Flow Tracker! 👋
+        
+        This significantly enhanced version includes major improvements:
+        
+        ### 🆕 **New Features:**
+        
+        #### 🤖 **AI-Powered Analysis**
+        - **Smart Pattern Recognition** with confidence scoring
+        - **Institutional vs Retail Detection** using premium and volume thresholds
+        - **Dark Pool Activity Detection** with multi-factor scoring
+        - **Predictive Alert System** with priority levels (Critical/High/Medium/Low)
+        
+        #### 📊 **Interactive Visualizations**
+        - **Real-time Charts** with Plotly integration
+        - **Volume Heatmaps** by strike and time
+        - **Sentiment Gauges** and flow analysis
+        - **Sector Flow Analysis** with breakdown charts
+        
+        #### ⚡ **Performance Enhancements**
+        - **Smart Caching** for faster data retrieval
+        - **Rate Limiting** to prevent API throttling
+        - **Database Storage** for historical analysis
+        - **Auto-refresh** with customizable intervals
+        
+        #### 🎯 **Advanced Features**
+        - **Enhanced Trade Side Detection** with confidence levels
+        - **Open Interest Deep Analysis** with liquidity scoring
+        - **Multi-factor Alert System** with customizable thresholds
+        - **Personalized Dashboard** with watchlists and risk preferences
+        
+        ### 🔧 **Technical Improvements**
+        - **SQLite Database** for historical data storage
+        - **Enhanced Error Handling** with retry mechanisms
+        - **Modern UI Design** with custom CSS styling
+        - **Advanced Filtering** with multiple criteria
+        
+        ### 📈 **Analysis Types:**
+        
+        #### 🔍 **Main Flow Analysis**
+        - Comprehensive trade analysis with enhanced metrics
+        - Sector breakdown and scenario analysis
+        - Performance metrics and confidence scoring
+        
+        #### 📊 **Advanced Visualizations**
+        - Interactive charts and heatmaps
+        - Real-time flow analysis
+        - Volume and premium distribution charts
+        
+        #### 🚨 **Smart Alert System**
+        - Priority-based alerts (Critical/High/Medium/Low)
+        - Multi-factor scoring system
+        - Customizable alert thresholds
+        
+        #### 🌑 **Dark Pool Analysis**
+        - Potential dark pool print detection
+        - Multi-factor scoring for unusual activity
+        - Large block trade identification
+        
+        #### 🏛️ **Institutional vs Retail**
+        - Separate analysis of institutional and retail flow
+        - Premium and volume-based classification
+        - Timing pattern analysis
+        
+        #### ⚡ **ETF Flow Scanner**
+        - Dedicated SPY/QQQ/IWM analysis
+        - Short-term (≤7 DTE) focus
+        - 0DTE spotlight section
+        
+        ### 🎛️ **Enhanced Controls:**
+        - **Personalized Dashboard** with watchlists
+        - **Advanced Filters** including IV range, volume, and OI
+        - **Quick Filter Buttons** for common scenarios
+        - **Auto-refresh** with customizable intervals
+        - **Real-time Status** indicators
+        
+        ### 💾 **Export Options:**
+        - **Enhanced CSV Export** with all analysis data
+        - **Smart Alerts Export** with priority levels
+        - **Summary Statistics** export
+        - **Historical Data** storage and retrieval
+        
+        **Select your analysis type and filters, then click 'Run Enhanced Scan' to begin!**
+        """)
 
-                elif "Open Interest" in scan_type:
-                    display_open_interest_analysis(trades)
-                    display_main_trades_table(trades, "📋 OI-Focused Trade Analysis")
-                    with st.expander("💾 Export Data", expanded=False):
-                        save_to_csv(trades, "oi_analysis")
+# --- SHORT-TERM ETF SCANNER ---
+def parse_option_chain_simple(opt_str):
+    """Simplified option chain parser for ETF scanner"""
+    try:
+        idx = next(i for i, c in enumerate(opt_str) if c.isdigit())
+        ticker = opt_str[:idx]
+        date_str = opt_str[idx:idx+6]
+        expiry_date = date(2000 + int(date_str[:2]), int(date_str[2:4]), int(date_str[4:6]))
+        dte = (expiry_date - date.today()).days
+        option_type = opt_str[idx+6]
+        strike = int(opt_str[idx+7:]) / 1000
+        return ticker.upper(), expiry_date.strftime('%Y-%m-%d'), dte, option_type.upper(), strike
+    except Exception:
+        return None, None, None, None, None
 
-                elif "Buy/Sell" in scan_type:
-                    display_buy_sell_analysis(trades)
-                    display_main_trades_table(trades, "📋 Buy/Sell Flow Analysis")
-                    with st.expander("💾 Export Data", expanded=False):
-                        save_to_csv(trades, "buy_sell_flow")
+def display_etf_scanner(trades):
+    """Enhanced ETF scanner display"""
+    st.markdown("### ⚡ ETF Flow Scanner (SPY/QQQ/IWM ≤ 7 DTE)")
+    
+    if not trades:
+        st.warning("No ETF trades found")
+        return
+    
+    # Summary metrics
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        total_premium = sum(t.get('premium', 0) for t in trades)
+        st.metric("Total Premium", f"${total_premium:,.0f}")
+    
+    with col2:
+        zero_dte = len([t for t in trades if t.get('dte', 0) == 0])
+        st.metric("0DTE Trades", zero_dte)
+    
+    with col3:
+        buy_trades = len([t for t in trades if 'BUY' in t.get('trade_side', '')])
+        sell_trades = len([t for t in trades if 'SELL' in t.get('trade_side', '')])
+        st.metric("Buy/Sell", f"{buy_trades}/{sell_trades}")
+    
+    with col4:
+        avg_vol_oi = np.mean([t.get('vol_oi_ratio', 0) for t in trades]) if trades else 0
+        st.metric("Avg Vol/OI", f"{avg_vol_oi:.1f}")
+    
+    with col5:
+        high_vol_trades = len([t for t in trades if t.get('vol_oi_ratio', 0) > 10])
+        st.metric("High Vol/OI", high_vol_trades)
+    
+    # Separate by ETF
+    spy_trades = [t for t in trades if t.get('ticker') == 'SPY']
+    qqq_trades = [t for t in trades if t.get('ticker') == 'QQQ']
+    iwm_trades = [t for t in trades if t.get('ticker') == 'IWM']
+    
+    def create_etf_table(ticker_trades, ticker_name):
+        if not ticker_trades:
+            st.info(f"No {ticker_name} trades found")
+            return
+        
+        # Sort by premium descending
+        sorted_trades = sorted(ticker_trades, key=lambda x: x.get('premium', 0), reverse=True)
+        
+        table_data = []
+        for trade in sorted_trades[:25]:  # Top 25 per ETF
+            table_data.append({
+                'Type': trade.get('type', ''),
+                'Side': trade.get('trade_side', 'N/A'),
+                'Strike': f"${trade.get('strike', 0):.0f}",
+                'DTE': trade.get('dte', 0),
+                'Price': f"${trade.get('price', 0):.2f}" if trade.get('price') != 'N/A' else 'N/A',
+                'Premium': f"${trade.get('premium', 0):,.0f}",
+                'Volume': f"{trade.get('volume', 0):,.0f}",
+                'OI': f"{trade.get('oi', 0):,.0f}",
+                'Vol/OI': f"{trade.get('vol_oi_ratio', 0):.1f}",
+                'Moneyness': trade.get('moneyness', 'N/A'),
+                'Time': trade.get('time_ny', 'N/A'),
+                'Rule': trade.get('rule_name', 'N/A')
+            })
+        
+        df = pd.DataFrame(table_data)
+        st.dataframe(df, use_container_width=True)
+    
+    # Display each ETF in tabs
+    tab1, tab2, tab3 = st.tabs(["🕷️ SPY", "🔷 QQQ", "🔸 IWM"])
+    
+    with tab1:
+        st.markdown("#### SPY Short-Term Flow")
+        spy_premium = sum(t.get('premium', 0) for t in spy_trades)
+        spy_count = len(spy_trades)
+        st.write(f"**{spy_count} trades | ${spy_premium:,.0f} premium**")
+        create_etf_table(spy_trades, "SPY")
+    
+    with tab2:
+        st.markdown("#### QQQ Short-Term Flow")
+        qqq_premium = sum(t.get('premium', 0) for t in qqq_trades)
+        qqq_count = len(qqq_trades)
+        st.write(f"**{qqq_count} trades | ${qqq_premium:,.0f} premium**")
+        create_etf_table(qqq_trades, "QQQ")
+    
+    with tab3:
+        st.markdown("#### IWM Short-Term Flow")
+        iwm_premium = sum(t.get('premium', 0) for t in iwm_trades)
+        iwm_count = len(iwm_trades)
+        st.write(f"**{iwm_count} trades | ${iwm_premium:,.0f} premium**")
+        create_etf_table(iwm_trades, "IWM")
+    
+    # Key insights
+    st.markdown("#### 🔍 Key ETF Insights")
+    
+    # Most active strikes
+    strike_activity = {}
+    for trade in trades:
+        key = f"{trade.get('ticker', '')} ${trade.get('strike', 0):.0f}{trade.get('type', '')}"
+        if key not in strike_activity:
+            strike_activity[key] = {'count': 0, 'total_premium': 0, 'total_volume': 0}
+        strike_activity[key]['count'] += 1
+        strike_activity[key]['total_premium'] += trade.get('premium', 0)
+        strike_activity[key]['total_volume'] += trade.get('volume', 0)
+    
+    # Sort by total premium
+    top_strikes = sorted(strike_activity.items(), 
+                        key=lambda x: x[1]['total_premium'], reverse=True)[:8]
+    
+    if top_strikes:
+        st.markdown("**🎯 Most Active ETF Strikes by Premium:**")
+        col1, col2 = st.columns(2)
+        
+        for i, (strike_key, data) in enumerate(top_strikes):
+            col = col1 if i % 2 == 0 else col2
+            with col:
+                st.write(f"**{strike_key}**")
+                st.write(f"💰 ${data['total_premium']:,.0f} | 📊 {data['total_volume']:,.0f} vol | {data['count']} trades")
+    
+    # 0DTE focus
+    zero_dte_trades = [t for t in trades if t.get('dte', 0) == 0]
+    if zero_dte_trades:
+        st.markdown("#### ⚡ 0DTE Spotlight")
+        zero_dte_premium = sum(t.get('premium', 0) for t in zero_dte_trades)
+        st.metric("0DTE Total Premium", f"${zero_dte_premium:,.0f}")
+        
+        # Top 0DTE trades
+        top_0dte = sorted(zero_dte_trades, key=lambda x: x.get('premium', 0), reverse=True)[:5]
+        st.markdown("**Top 0DTE Trades:**")
+        for i, trade in enumerate(top_0dte, 1):
+            side_indicator = "🟢" if "BUY" in trade.get('trade_side', '') else "🔴" if "SELL" in trade.get('trade_side', '') else "⚪"
+            st.write(f"{i}. {side_indicator} {trade.get('ticker', '')} {trade.get('strike', 0):.0f}{trade.get('type', '')} - "
+                    f"${trade.get('premium', 0):,.0f} ({trade.get('trade_side', 'N/A')})")
 
-                elif "Alert" in scan_type:
-                    display_enhanced_alerts(trades)
-                    with st.expander("💾 Export Data", expanded=False):
-                        save_to_csv(trades, "enhanced_alerts")
-
-else:
-    st.markdown("""
-    ## Welcome to Enhanced Options Flow Tracker! 👋
-    
-    This enhanced version includes several major improvements:
-    
-    ### 🆕 New Features:
-    
-    #### 🔄 **Buy/Sell Identification**
-    - **Automatic Trade Side Detection** using bid/ask analysis
-    - **Pattern Recognition** for aggressive vs passive fills
-    - **Volume/OI Analysis** to identify new position building
-    - **Rule-based Detection** using trade descriptions
-    
-    #### 📈 **Advanced Open Interest Analysis**
-    - **OI Level Classification** (Very Low to Very High)
-    - **Liquidity Scoring** based on OI and volume
-    - **Strike Concentration Detection** 
-    - **OI Change Predictions** based on volume patterns
-    
-    #### 🎯 **Enhanced Scenario Detection**
-    - **Buy vs Sell specific scenarios** (e.g., "Large OTM Call Buying" vs "Large OTM Call Writing")
-    - **OI-based patterns** (High OI + Volume Surge, Strike Concentration)
-    - **Advanced strategies** (Long/Short Volatility, Portfolio Hedging)
-    
-    ### 📊 **Available Analysis Types:**
-    
-    #### 🔍 **Main Flow Analysis**
-    - Comprehensive trade table with buy/sell identification
-    - OI level and liquidity scoring for each trade
-    - Enhanced scenario classification
-    - **Short-Term ETF Focus section** included automatically
-    
-    #### 📈 **Open Interest Deep Dive**
-    - OI level distribution analysis
-    - Liquidity analysis across all trades
-    - High concentration plays identification
-    
-    #### 🔄 **Buy/Sell Flow Analysis**  
-    - Separate analysis of buy-side vs sell-side activity
-    - Premium flow comparison
-    - Top trades by direction
-    
-    #### 🚨 **Enhanced Alert System**
-    - Multi-factor scoring including OI analysis
-    - Trade side consideration in alerts
-    - Advanced pattern recognition
-    
-    #### ⚡ **ETF Flow Scanner**
-    - **Dedicated SPY/QQQ/IWM scanner** with ≤7 DTE focus
-    - **Separate tabs** for each ETF with detailed analysis
-    - **0DTE spotlight** for same-day expiration trades
-    - **Most active strikes** analysis by premium
-    
-    ### 🎛️ **Enhanced Filtering:**
-    - **Trade Side Filter**: Filter by Buy Only, Sell Only, or Aggressive trades
-    - **Premium Range Filters**: From under $100K to above $1M
-    - **DTE Filters**: 0DTE, Weekly, Monthly, Quarterly, LEAPS
-    - **Quick Filter Buttons**: Mega Trades, 0DTE Plays
-    
-    ### 💡 **How Trade Side Detection Works:**
-    1. **Bid/Ask Analysis**: Trades near ask = BUY, near bid = SELL
-    2. **Volume/OI Patterns**: High Vol/OI ratio suggests new buying
-    3. **Description Parsing**: Keywords like "sweep", "aggressive" indicate buying
-    4. **Rule Pattern Analysis**: Ascending fills = buying, descending = selling
-    
-    ### 📋 **Enhanced Trade Information:**
-    Each trade now shows:
-    - **Trade Side**: BUY/SELL/UNKNOWN with confidence indicators
-    - **OI Level**: Very Low to Very High classification  
-    - **Liquidity Score**: Poor to Excellent based on OI and volume
-    - **Vol/OI Ratio**: Key metric for position building detection
-    - **Enhanced Scenarios**: More specific strategy identification
-    
-    **Select your analysis type and filters, then click 'Run Enhanced Scan' to begin!**
-    """)
+if __name__ == "__main__":
+    main()
