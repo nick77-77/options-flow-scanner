@@ -9,12 +9,10 @@ import sqlite3
 import plotly.graph_objects as go
 import plotly.express as px
 import math
-import time
 
 # --- CONFIGURATION ---
 class Config:
     UW_TOKEN = st.secrets.get("UW_TOKEN", "e6e8601a-0746-4cec-a07d-c3eabfc13926")
-    ALPHA_VANTAGE_API_KEY = "MT9DA2UV4DROMAEA"
     EXCLUDE_TICKERS = {'TSLA', 'MSTR', 'CRCL', 'COIN', 'META', 'NVDA'}
     ALLOWED_TICKERS = {'QQQ', 'SPY', 'IWM'}
     MIN_PREMIUM = 100000
@@ -44,63 +42,7 @@ headers = {
 }
 url = 'https://api.unusualwhales.com/api/option-trades/flow-alerts'
 
-# Cache for stock prices to avoid hitting API limits
-stock_price_cache = {}
-
-# --- STOCK PRICE FETCHING FROM ALPHA VANTAGE ---
-def get_stock_price(ticker):
-    """
-    Fetch current stock price from Alpha Vantage API
-    """
-    # Check cache first (cache for 5 minutes)
-    current_time = time.time()
-    if ticker in stock_price_cache:
-        cached_price, cached_time = stock_price_cache[ticker]
-        if current_time - cached_time < 300:  # 5 minutes
-            return cached_price
-    
-    try:
-        # Alpha Vantage API call for real-time quote
-        av_url = f'https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey={config.ALPHA_VANTAGE_API_KEY}'
-        
-        response = httpx.get(av_url, timeout=10)
-        if response.status_code != 200:
-            return None
-            
-        data = response.json()
-        
-        # Parse Alpha Vantage response
-        if 'Global Quote' in data and '05. price' in data['Global Quote']:
-            price = float(data['Global Quote']['05. price'])
-            # Cache the result
-            stock_price_cache[ticker] = (price, current_time)
-            return price
-        
-        # Fallback: try intraday data
-        av_url_intraday = f'https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol={ticker}&interval=1min&apikey={config.ALPHA_VANTAGE_API_KEY}'
-        
-        response = httpx.get(av_url_intraday, timeout=10)
-        if response.status_code != 200:
-            return None
-            
-        data = response.json()
-        
-        if 'Time Series (1min)' in data:
-            # Get the most recent price
-            time_series = data['Time Series (1min)']
-            latest_time = max(time_series.keys())
-            price = float(time_series[latest_time]['4. close'])
-            # Cache the result
-            stock_price_cache[ticker] = (price, current_time)
-            return price
-            
-        return None
-        
-    except Exception as e:
-        st.warning(f"Could not fetch stock price for {ticker}: {e}")
-        return None
-
-# --- EXPECTED MOVE CALCULATION ---
+# --- NEW EXPECTED MOVE CALCULATION ---
 def calculate_expected_move(stock_price, iv, dte, probability=0.68):
     """
     Calculate expected move based on Black-Scholes implied volatility
@@ -126,8 +68,7 @@ def calculate_expected_move(stock_price, iv, dte, probability=0.68):
                 'upper_range': stock_price,
                 'lower_range': stock_price,
                 'move_percentage': 0,
-                'validity': 'Invalid Data',
-                'has_stock_price': False
+                'validity': 'Invalid Data'
             }
         
         # Standard deviation multiplier for different probabilities
@@ -159,8 +100,7 @@ def calculate_expected_move(stock_price, iv, dte, probability=0.68):
             'lower_range': lower_range,
             'move_percentage': move_percentage,
             'validity': validity,
-            'probability': probability,
-            'has_stock_price': True
+            'probability': probability
         }
         
     except (ValueError, TypeError, ZeroDivisionError):
@@ -169,8 +109,7 @@ def calculate_expected_move(stock_price, iv, dte, probability=0.68):
             'upper_range': stock_price if stock_price else 0,
             'lower_range': stock_price if stock_price else 0,
             'move_percentage': 0,
-            'validity': 'Calculation Error',
-            'has_stock_price': False
+            'validity': 'Calculation Error'
         }
 
 def analyze_strike_vs_expected_move(strike, stock_price, expected_move_data, option_type):
@@ -1605,20 +1544,6 @@ def fetch_etf_trades():
         data = response.json().get('data', [])
         filtered_trades = []
         
-        # Get unique tickers for batch stock price fetching
-        unique_tickers = set()
-        for trade in data:
-            option_chain = trade.get('option_chain', '')
-            ticker, expiry, dte, opt_type, strike = parse_option_chain_simple(option_chain)
-            if ticker and ticker.upper() in allowed_tickers and dte is not None and dte <= max_dte:
-                unique_tickers.add(ticker.upper())
-        
-        # Fetch stock prices for all unique tickers
-        stock_prices = {}
-        for ticker in unique_tickers:
-            with st.spinner(f"Fetching {ticker} stock price..."):
-                stock_prices[ticker] = get_stock_price(ticker)
-        
         for trade in data:
             option_chain = trade.get('option_chain', '')
             ticker, expiry, dte, opt_type, strike = parse_option_chain_simple(option_chain)
@@ -1648,13 +1573,11 @@ def fetch_etf_trades():
                 if price != 'N/A':
                     price = float(price)
                 iv = float(trade.get('iv', 0)) if trade.get('iv', 0) not in ['N/A', '', None] else 0
+                underlying_price = float(trade.get('underlying_price', strike)) if trade.get('underlying_price', strike) not in ['N/A', ''] else strike
             except (ValueError, TypeError):
                 premium = volume = oi = iv = 0
                 price = 'N/A'
-
-            # Get stock price from our fetched data
-            underlying_price = stock_prices.get(ticker.upper(), strike)
-            has_real_underlying = underlying_price != strike and underlying_price is not None
+                underlying_price = strike
 
             trade_data = {
                 'ticker': ticker,
@@ -1670,14 +1593,13 @@ def fetch_etf_trades():
                 'vol_oi_ratio': volume / max(oi, 1),
                 'time_ny': ny_time_str,
                 'option': option_chain,
-                'underlying_price': underlying_price if underlying_price else strike,
+                'underlying_price': underlying_price,
                 'rule_name': trade.get('rule_name', ''),
                 'description': trade.get('description', ''),
-                'moneyness': calculate_moneyness(strike, underlying_price if underlying_price else strike),
+                'moneyness': calculate_moneyness(strike, underlying_price),
                 'bid': trade.get('bid', 0),
                 'ask': trade.get('ask', 0),
-                'iv': iv,
-                'has_underlying_price': has_real_underlying
+                'iv': iv
             }
             
             # Add enhanced trade side detection
@@ -1686,31 +1608,13 @@ def fetch_etf_trades():
             trade_data['side_confidence'] = confidence
             trade_data['side_reasoning'] = reasoning
             
-            # Add expected move analysis only if we have valid data
-            if has_real_underlying and iv > 0:
-                expected_move_data = calculate_expected_move(underlying_price, iv, dte)
-                trade_data['expected_move_data'] = expected_move_data
-                
-                # Add strike vs expected move analysis
-                expected_move_analysis = analyze_strike_vs_expected_move(strike, underlying_price, expected_move_data, opt_type)
-                trade_data['expected_move_analysis'] = expected_move_analysis
-            else:
-                # No valid expected move calculation possible
-                trade_data['expected_move_data'] = {
-                    'expected_move': 0,
-                    'upper_range': underlying_price if underlying_price else strike,
-                    'lower_range': underlying_price if underlying_price else strike,
-                    'move_percentage': 0,
-                    'validity': 'No Stock Price Data' if not has_real_underlying else 'No IV Data',
-                    'has_stock_price': has_real_underlying
-                }
-                trade_data['expected_move_analysis'] = {
-                    'position': 'Unknown',
-                    'distance': 0,
-                    'distance_pct': 0,
-                    'probability': 'Unknown',
-                    'analysis': 'Cannot calculate - missing stock price or IV data'
-                }
+            # Add expected move analysis
+            expected_move_data = calculate_expected_move(underlying_price, iv, dte)
+            trade_data['expected_move_data'] = expected_move_data
+            
+            # Add strike vs expected move analysis
+            expected_move_analysis = analyze_strike_vs_expected_move(strike, underlying_price, expected_move_data, opt_type)
+            trade_data['expected_move_analysis'] = expected_move_analysis
             
             filtered_trades.append(trade_data)
         
@@ -1737,27 +1641,6 @@ def fetch_general_flow():
         data = response.json().get('data', [])
         result = []
         ticker_data = defaultdict(list)
-
-        # Get unique tickers for batch stock price fetching
-        unique_tickers = set()
-        for trade in data:
-            option_chain = trade.get('option_chain', '')
-            ticker, expiry, dte, opt_type, strike = parse_option_chain(option_chain)
-            if ticker and ticker not in config.EXCLUDE_TICKERS:
-                premium = float(trade.get('total_premium', 0))
-                if premium >= config.MIN_PREMIUM:
-                    unique_tickers.add(ticker)
-
-        # Fetch stock prices for all unique tickers (limit to avoid API rate limits)
-        stock_prices = {}
-        ticker_list = list(unique_tickers)[:20]  # Limit to 20 tickers to avoid rate limits
-        
-        if ticker_list:
-            progress_bar = st.progress(0)
-            for i, ticker in enumerate(ticker_list):
-                stock_prices[ticker] = get_stock_price(ticker)
-                progress_bar.progress((i + 1) / len(ticker_list))
-            progress_bar.empty()
 
         for trade in data:
             option_chain = trade.get('option_chain', '')
@@ -1792,28 +1675,12 @@ def fetch_general_flow():
                     except (ValueError, TypeError):
                         continue
 
-            # Get underlying price - try fetched stock price first, then API data
-            underlying_price = stock_prices.get(ticker, None)
-            has_real_underlying = underlying_price is not None
-            
-            if not has_real_underlying:
-                # Fallback to API data
-                underlying_price_fields = ['underlying_price', 'stock_price', 'current_price', 'spot_price', 'underlying']
-                for field in underlying_price_fields:
-                    if field in trade and trade[field] not in ['N/A', '', None, 0]:
-                        try:
-                            test_price = float(trade[field])
-                            if test_price > 0:
-                                underlying_price = test_price
-                                has_real_underlying = True
-                                break
-                        except (ValueError, TypeError):
-                            continue
-            
-            # Final fallback to strike price
-            if underlying_price is None:
+            # Get underlying price
+            underlying_price = trade.get('underlying_price', strike)
+            try:
+                underlying_price = float(underlying_price)
+            except (ValueError, TypeError):
                 underlying_price = strike
-                has_real_underlying = False
 
             trade_data = {
                 'ticker': ticker,
@@ -1836,8 +1703,7 @@ def fetch_general_flow():
                 'iv': iv,
                 'iv_percentage': f"{iv:.1%}" if iv > 0 else "N/A",
                 'bid': float(trade.get('bid', 0)) if trade.get('bid') not in ['N/A', '', None] else 0,
-                'ask': float(trade.get('ask', 0)) if trade.get('ask') not in ['N/A', '', None] else 0,
-                'has_underlying_price': has_real_underlying
+                'ask': float(trade.get('ask', 0)) if trade.get('ask') not in ['N/A', '', None] else 0
             }
             
             # Add enhanced trade side detection
@@ -1846,31 +1712,13 @@ def fetch_general_flow():
             trade_data['side_confidence'] = confidence
             trade_data['side_reasoning'] = reasoning
 
-            # Add expected move analysis only if we have valid data
-            if has_real_underlying and iv > 0:
-                expected_move_data = calculate_expected_move(underlying_price, iv, dte)
-                trade_data['expected_move_data'] = expected_move_data
-                
-                # Add strike vs expected move analysis
-                expected_move_analysis = analyze_strike_vs_expected_move(strike, underlying_price, expected_move_data, opt_type)
-                trade_data['expected_move_analysis'] = expected_move_analysis
-            else:
-                # No valid expected move calculation possible
-                trade_data['expected_move_data'] = {
-                    'expected_move': 0,
-                    'upper_range': underlying_price,
-                    'lower_range': underlying_price,
-                    'move_percentage': 0,
-                    'validity': 'No Stock Price Data' if not has_real_underlying else 'No IV Data',
-                    'has_stock_price': has_real_underlying
-                }
-                trade_data['expected_move_analysis'] = {
-                    'position': 'Unknown',
-                    'distance': 0,
-                    'distance_pct': 0,
-                    'probability': 'Unknown',
-                    'analysis': 'Cannot calculate - missing stock price or IV data'
-                }
+            # Add expected move analysis
+            expected_move_data = calculate_expected_move(underlying_price, iv, dte)
+            trade_data['expected_move_data'] = expected_move_data
+            
+            # Add strike vs expected move analysis
+            expected_move_analysis = analyze_strike_vs_expected_move(strike, underlying_price, expected_move_data, opt_type)
+            trade_data['expected_move_analysis'] = expected_move_analysis
 
             ticker_data[ticker].append(trade_data)
 
@@ -2029,8 +1877,6 @@ def display_enhanced_summary(trades):
         with col4:
             within_em = len([t for t in em_trades if 'Within Expected Move' in t.get('expected_move_analysis', {}).get('position', '')])
             st.metric("Within Expected Move", within_em)
-    else:
-        st.info("💡 Expected Move requires both stock price and IV data. Enable real-time stock price fetching for EM analysis.")
 
 def display_pattern_recognition_analysis(trades):
     """Display advanced pattern recognition results"""
@@ -2354,8 +2200,150 @@ def display_main_trades_table(trades, title="📋 Main Trades Analysis"):
         st.info("No trades found")
         return
     
-    # Single combined view
-    display_trades_combined_view(trades)
+    # Add tabs for different views
+    tab1, tab2, tab3 = st.tabs(["📊 Moneyness View", "📈 Expected Move View", "🔍 Combined View"])
+    
+    with tab1:
+        display_trades_by_moneyness(trades)
+    
+    with tab2:
+        display_trades_by_expected_move(trades)
+    
+    with tab3:
+        display_trades_combined_view(trades)
+
+def display_trades_by_moneyness(trades):
+    """Display trades organized by moneyness"""
+    st.markdown("#### 💰 Trades by Moneyness")
+    
+    # Separate calls and puts
+    calls = [t for t in trades if t['type'] == 'C']
+    puts = [t for t in trades if t['type'] == 'P']
+    
+    def create_moneyness_table(trade_list, trade_type_name):
+        if not trade_list:
+            st.info(f"No {trade_type_name.lower()} found")
+            return
+        
+        # Sort by premium descending
+        sorted_trades = sorted(trade_list, key=lambda x: x.get('premium', 0), reverse=True)
+        
+        table_data = []
+        for trade in sorted_trades[:25]:  # Show top 25 per section
+            oi_analysis = trade.get('oi_analysis', {})
+            enhanced_side = trade.get('enhanced_side', 'UNKNOWN')
+            confidence = trade.get('side_confidence', 0)
+            
+            # Side display with confidence indicator
+            if 'BUY' in enhanced_side:
+                side_display = f"🟢 {enhanced_side}"
+            elif 'SELL' in enhanced_side:
+                side_display = f"🔴 {enhanced_side}"
+            else:
+                side_display = f"⚪ {enhanced_side}"
+            
+            # Confidence indicator
+            if confidence >= 0.7:
+                conf_indicator = "🟢"
+            elif confidence >= 0.4:
+                conf_indicator = "🟡"
+            else:
+                conf_indicator = "🔴"
+            
+            table_data.append({
+                'Ticker': trade['ticker'],
+                'Side': side_display,
+                'Conf': f"{conf_indicator} {confidence:.0%}",
+                'Strike': f"${trade['strike']:.0f}",
+                'Expiry': trade['expiry'],
+                'DTE': trade['dte'],
+                'Premium': f"${trade['premium']:,.0f}",
+                'Volume': f"{trade['volume']:,}",
+                'OI': f"{trade['open_interest']:,}",
+                'Vol/OI': f"{trade['vol_oi_ratio']:.1f}",
+                'Moneyness': trade['moneyness'],
+                'IV': trade['iv_percentage'],
+                'Primary Scenario': trade.get('scenarios', ['Normal Flow'])[0],
+                'Time': trade['time_ny']
+            })
+        
+        df = pd.DataFrame(table_data)
+        st.dataframe(df, use_container_width=True)
+    
+    # Display in two columns
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("#### 🟢 CALLS")
+        create_moneyness_table(calls, "Calls")
+    
+    with col2:
+        st.markdown("#### 🔴 PUTS")
+        create_moneyness_table(puts, "Puts")
+
+def display_trades_by_expected_move(trades):
+    """Display trades organized by expected move position"""
+    st.markdown("#### 📈 Trades by Expected Move Position")
+    
+    # Filter trades with valid expected move data
+    em_trades = [t for t in trades if t.get('expected_move_data', {}).get('expected_move', 0) > 0]
+    
+    if not em_trades:
+        st.info("No trades with valid expected move data found")
+        return
+    
+    # Group by expected move position
+    above_em = [t for t in em_trades if 'Above Expected Move' in t.get('expected_move_analysis', {}).get('position', '')]
+    below_em = [t for t in em_trades if 'Below Expected Move' in t.get('expected_move_analysis', {}).get('position', '')]
+    within_em = [t for t in em_trades if 'Within Expected Move' in t.get('expected_move_analysis', {}).get('position', '')]
+    
+    def create_em_table(trade_list, position_name, emoji):
+        if not trade_list:
+            st.info(f"No trades {position_name}")
+            return
+        
+        st.markdown(f"#### {emoji} {position_name} ({len(trade_list)} trades)")
+        
+        # Sort by distance from expected move
+        sorted_trades = sorted(trade_list, key=lambda x: x.get('expected_move_analysis', {}).get('distance_pct', 0), reverse=True)
+        
+        table_data = []
+        for trade in sorted_trades[:15]:  # Show top 15 per category
+            enhanced_side = trade.get('enhanced_side', 'UNKNOWN')
+            confidence = trade.get('side_confidence', 0)
+            em_analysis = trade.get('expected_move_analysis', {})
+            em_data = trade.get('expected_move_data', {})
+            
+            # Side display
+            if 'BUY' in enhanced_side:
+                side_display = f"🟢 {enhanced_side}"
+            elif 'SELL' in enhanced_side:
+                side_display = f"🔴 {enhanced_side}"
+            else:
+                side_display = f"⚪ {enhanced_side}"
+            
+            table_data.append({
+                'Ticker': trade['ticker'],
+                'Type': trade['type'],
+                'Side': side_display,
+                'Conf': f"{confidence:.0%}",
+                'Strike': f"${trade['strike']:.0f}",
+                'DTE': trade['dte'],
+                'Premium': f"${trade['premium']:,.0f}",
+                'Expected Move': f"±{em_data.get('move_percentage', 0):.1f}%",
+                'Distance': f"{em_analysis.get('distance_pct', 0):.1f}%",
+                'Probability': em_analysis.get('probability', 'Unknown'),
+                'Analysis': em_analysis.get('analysis', 'N/A')[:50] + "..." if len(em_analysis.get('analysis', 'N/A')) > 50 else em_analysis.get('analysis', 'N/A'),
+                'Time': trade['time_ny']
+            })
+        
+        df = pd.DataFrame(table_data)
+        st.dataframe(df, use_container_width=True)
+    
+    # Display each category
+    create_em_table(above_em, "Above Expected Move", "🚀")
+    create_em_table(below_em, "Below Expected Move", "⬇️")
+    create_em_table(within_em, "Within Expected Move", "🎯")
 
 def display_trades_combined_view(trades):
     """Display trades with both moneyness and expected move information"""
@@ -2729,8 +2717,6 @@ def display_etf_scanner(trades):
                     st.write(f"**{trade['ticker']} {trade['strike']:.0f}{trade['type']}** {side_indicator} {em_emoji}")
                     st.write(f"💰 ${trade['premium']:,.0f} | ±{trade['expected_move_data']['move_percentage']:.1f}% EM")
                     st.write(f"📊 {em_analysis.get('distance_pct', 0):.1f}% from EM range")
-    else:
-        st.info("💡 Expected Move analysis requires stock price data. Enable Alpha Vantage API for full EM analysis.")
     
     # Key insights with Expected Move context
     st.markdown("#### 🔍 Key ETF Insights with Expected Move")
@@ -3240,12 +3226,12 @@ else:
     st.markdown("""
     ## Welcome to the Enhanced Options Flow Tracker with Expected Move! 👋
     
-    ### 🆕 **NEW: Expected Move Analysis with Alpha Vantage Integration** 📈
+    ### 🆕 **NEW: Expected Move Analysis** 📈
     
     #### 🎯 **What is Expected Move?**
     Expected Move (EM) calculates the theoretical 1-standard deviation price range based on implied volatility:
     
-    **Formula**: `EM = Stock Price × IV × √(DTE/365)` *(p = 0.68)*
+    **Formula**: `EM = Stock Price × IV × √(DTE/365)`
     
     This tells you the market's expectation for price movement with **68% probability** (1 standard deviation).
     
@@ -3257,11 +3243,10 @@ else:
     - **⬇️ Below Expected Move**: Strikes betting on extreme moves in opposite direction (Low probability <16%)
     - **💰 ITM Positions**: In-the-money options (High probability >50%)
     
-    ##### 📈 **Real-Time Stock Price Integration:**
-    - **Alpha Vantage API**: Fetches real-time stock prices for accurate EM calculations
-    - **Automatic Caching**: 5-minute cache to avoid API rate limits
-    - **Batch Processing**: Efficient fetching for multiple tickers
-    - **Fallback System**: Uses API data when Alpha Vantage unavailable
+    ##### 📈 **Enhanced Trade Tables:**
+    - **Moneyness View**: Traditional ITM/OTM/ATM analysis
+    - **Expected Move View**: Organized by EM position with probability estimates
+    - **Combined View**: Both moneyness and EM data side-by-side
     
     ##### 🎯 **Key Insights:**
     - **Identify unusual bets**: Trades above/below expected move may signal special situations
@@ -3289,7 +3274,6 @@ else:
     - **Confidence Indicators**: 🟢 High (70%+) / 🟡 Medium (40-69%) / 🔴 Low (<40%)
     - **Expected Move Position**: 🚀 Above EM / 🎯 Within EM / ⬇️ Below EM
     - **Probability Estimates**: Based on EM analysis and option positioning
-    - **Real-Time Stock Prices**: Live price data for accurate calculations
     - **Detailed Reasoning**: See the logic behind each classification
     - **Quality Metrics**: Track data completeness and detection success rates
     
@@ -3297,12 +3281,11 @@ else:
     
     #### 🔍 **Main Flow Analysis**
     - All trades with enhanced buy/sell detection and EM analysis
-    - **Combined view** showing both moneyness and expected move data
+    - **Three viewing modes**: Moneyness, Expected Move, and Combined
     - Confidence scoring and reasoning for each trade
     - Short-term ETF focus section with EM context
     
     #### ⚡ **ETF Flow Scanner** ⭐ ENHANCED!
-    - **Real-Time Stock Prices**: Fetches live SPY/QQQ/IWM prices via Alpha Vantage
     - **Expected Move Integration**: See average EM for each ETF
     - **EM Position Tracking**: Count of trades above/within/below expected move
     - **0DTE EM Analysis**: Special focus on same-day expiration with EM context
@@ -3340,42 +3323,36 @@ else:
     5. **High IV** leads to wider expected moves - consider if realistic
     6. **Compare across ETFs** - SPY vs QQQ vs IWM expected moves can show sector rotation
     
-    ### 🛠️ **Alpha Vantage Integration Benefits:**
+    ### 🛠️ **How Expected Move Enhances Each Feature:**
     
-    #### 📊 **Real-Time Accuracy**
-    - **Live Stock Prices**: Get current market prices for precise EM calculations
-    - **5-Minute Caching**: Efficient API usage without hitting rate limits
-    - **Batch Processing**: Smart fetching for multiple tickers simultaneously
-    - **Automatic Fallback**: Uses API data when Alpha Vantage unavailable
+    #### 📊 **Enhanced Summary**
+    - **Average Expected Move**: See market's volatility expectation
+    - **EM Position Distribution**: Count trades above/within/below EM
+    - **Probability Weighted Analysis**: Better understanding of trade success likelihood
     
-    #### 🎯 **Enhanced Precision**
-    - **Accurate Moneyness**: Real-time ITM/OTM/ATM classification
-    - **Precise EM Ranges**: Calculate exact price boundaries for probability estimates
-    - **Better Strike Analysis**: Know exactly where strikes sit relative to current price
-    - **Improved Alerts**: More accurate unusual activity detection
+    #### 🔄 **Buy/Sell Analysis**
+    - **EM Context**: See if buying/selling is focused on high/low probability strikes
+    - **Risk Assessment**: Combine trade direction with probability estimates
+    - **Smart Money Detection**: High confidence buys far from EM may be informed
+    
+    #### 🚨 **Alert System**
+    - **EM Violations**: Automatic alerts for strikes significantly outside expected range
+    - **Probability Scoring**: Weight alerts by success probability
+    - **Event Detection**: Large premiums + extreme EM positions = potential catalysts
     
     ### 🚀 **What's New in This Version:**
     
-    ✅ **Alpha Vantage Integration** - Real-time stock price fetching  
     ✅ **Expected Move Calculation** - Full Black-Scholes based EM analysis  
     ✅ **Strike Position Analysis** - Above/Within/Below EM classification  
     ✅ **Probability Estimates** - Success likelihood for each position  
-    ✅ **Combined View Only** - Streamlined single table with all data  
+    ✅ **Three Viewing Modes** - Moneyness, EM, and Combined views  
     ✅ **ETF EM Integration** - Complete EM analysis for SPY/QQQ/IWM  
     ✅ **0DTE EM Focus** - Special handling for same-day expiration  
     ✅ **Alert EM Scoring** - EM violations boost alert scores  
     ✅ **CSV Export Enhancement** - EM data included in all exports  
-    ✅ **Stock Price Caching** - Efficient API usage with 5-minute cache  
     ✅ **Extreme EM Detection** - Highlight most aggressive EM plays  
     
-    ### 🔧 **Setup Instructions:**
+    **Ready to see Expected Move analysis in action? Select your analysis type and click 'Run Enhanced Scan'!**
     
-    1. **API Key**: Alpha Vantage API key (MT9DA2UV4DROMAEA) is pre-configured
-    2. **Rate Limits**: Automatic caching prevents API overuse
-    3. **Fallback**: System works with or without Alpha Vantage data
-    4. **Progress Indicators**: Shows stock price fetching progress
-    
-    **Ready to see Expected Move analysis with real-time stock prices? Select your analysis type and click 'Run Enhanced Scan'!**
-    
-    **🎯 Try the ETF Flow Scanner to see Expected Move analysis on SPY, QQQ, and IWM with live stock prices!**
+    **🎯 Try the ETF Flow Scanner to see Expected Move analysis on SPY, QQQ, and IWM short-term options!**
     """)
