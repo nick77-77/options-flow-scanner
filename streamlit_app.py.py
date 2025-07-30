@@ -1,15 +1,18 @@
 import streamlit as st
 import httpx
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from collections import defaultdict
 import pandas as pd
 import numpy as np
 from zoneinfo import ZoneInfo  # Python 3.9+
+import sqlite3
+import plotly.graph_objects as go
+import plotly.express as px
 
 # --- CONFIGURATION ---
 class Config:
     UW_TOKEN = st.secrets.get("UW_TOKEN", "e6e8601a-0746-4cec-a07d-c3eabfc13926")
-    EXCLUDE_TICKERS = {'TSLA', 'MSTR', 'CRCL', 'COIN', 'META', 'NVDA','AMD'}
+    EXCLUDE_TICKERS = {'TSLA', 'MSTR', 'CRCL', 'COIN', 'META', 'NVDA'}
     ALLOWED_TICKERS = {'QQQ', 'SPY', 'IWM'}
     MIN_PREMIUM = 100000
     LIMIT = 500
@@ -38,7 +41,409 @@ headers = {
 }
 url = 'https://api.unusualwhales.com/api/option-trades/flow-alerts'
 
-# --- ENHANCED BUY/SELL DETECTION ---
+# --- OI TRACKING SYSTEM ---
+def init_oi_tracking_db():
+    """Initialize SQLite database for OI tracking"""
+    conn = sqlite3.connect('oi_tracking.db')
+    cursor = conn.cursor()
+    
+    # Create table for tracked trades
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS tracked_trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL,
+            option_chain TEXT NOT NULL,
+            strike REAL NOT NULL,
+            expiry DATE NOT NULL,
+            option_type TEXT NOT NULL,
+            trade_date DATE NOT NULL,
+            trade_time TEXT NOT NULL,
+            enhanced_side TEXT NOT NULL,
+            side_confidence REAL NOT NULL,
+            premium REAL NOT NULL,
+            volume INTEGER NOT NULL,
+            initial_oi INTEGER NOT NULL,
+            predicted_oi_change TEXT NOT NULL,
+            alert_score INTEGER DEFAULT 0,
+            scenarios TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Create table for daily OI snapshots
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS oi_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL,
+            option_chain TEXT NOT NULL,
+            strike REAL NOT NULL,
+            expiry DATE NOT NULL,
+            option_type TEXT NOT NULL,
+            snapshot_date DATE NOT NULL,
+            open_interest INTEGER NOT NULL,
+            volume INTEGER DEFAULT 0,
+            price REAL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(option_chain, snapshot_date)
+        )
+    ''')
+    
+    # Create table for tracking results
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS tracking_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tracked_trade_id INTEGER NOT NULL,
+            days_tracked INTEGER NOT NULL,
+            initial_oi INTEGER NOT NULL,
+            current_oi INTEGER NOT NULL,
+            oi_change INTEGER NOT NULL,
+            oi_change_pct REAL NOT NULL,
+            prediction_accuracy TEXT NOT NULL,
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (tracked_trade_id) REFERENCES tracked_trades (id)
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+
+def save_high_confidence_trades(trades):
+    """Save high-confidence trades to tracking database"""
+    if not trades:
+        return 0
+    
+    conn = sqlite3.connect('oi_tracking.db')
+    cursor = conn.cursor()
+    
+    saved_count = 0
+    for trade in trades:
+        # Only save high-confidence trades (70%+ confidence)
+        if trade.get('side_confidence', 0) < 0.7:
+            continue
+            
+        # Skip if already exists
+        cursor.execute('''
+            SELECT id FROM tracked_trades 
+            WHERE option_chain = ? AND trade_date = DATE(?)
+        ''', (trade.get('option', ''), trade.get('time_utc', '')[:10]))
+        
+        if cursor.fetchone():
+            continue
+            
+        # Predict OI change based on our analysis
+        vol_oi_ratio = trade.get('vol_oi_ratio', 0)
+        enhanced_side = trade.get('enhanced_side', '')
+        volume = trade.get('volume', 0)
+        
+        if vol_oi_ratio > 5 and 'BUY' in enhanced_side:
+            predicted_change = "Major Increase (5x+ ratio)"
+        elif vol_oi_ratio > 2 and 'BUY' in enhanced_side:
+            predicted_change = "Moderate Increase (2-5x ratio)"
+        elif 'BUY' in enhanced_side and volume > 100:
+            predicted_change = "Small Increase (buying detected)"
+        elif 'SELL' in enhanced_side and vol_oi_ratio < 0.5:
+            predicted_change = "Decrease (selling detected)"
+        else:
+            predicted_change = "Minimal Change"
+        
+        try:
+            cursor.execute('''
+                INSERT INTO tracked_trades (
+                    ticker, option_chain, strike, expiry, option_type,
+                    trade_date, trade_time, enhanced_side, side_confidence,
+                    premium, volume, initial_oi, predicted_oi_change,
+                    alert_score, scenarios
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                trade.get('ticker', ''),
+                trade.get('option', ''),
+                trade.get('strike', 0),
+                trade.get('expiry', ''),
+                trade.get('type', ''),
+                trade.get('time_utc', '')[:10],
+                trade.get('time_ny', ''),
+                trade.get('enhanced_side', ''),
+                trade.get('side_confidence', 0),
+                trade.get('premium', 0),
+                trade.get('volume', 0),
+                trade.get('open_interest', 0),
+                predicted_change,
+                trade.get('alert_score', 0),
+                ', '.join(trade.get('scenarios', []))
+            ))
+            saved_count += 1
+        except Exception as e:
+            continue
+    
+    conn.commit()
+    conn.close()
+    return saved_count
+
+def get_tracking_performance_metrics():
+    """Get overall performance metrics for our OI predictions"""
+    try:
+        conn = sqlite3.connect('oi_tracking.db')
+        cursor = conn.cursor()
+        
+        # Overall accuracy stats
+        cursor.execute('''
+            SELECT 
+                prediction_accuracy,
+                COUNT(*) as count,
+                AVG(oi_change_pct) as avg_oi_change_pct
+            FROM tracking_results
+            GROUP BY prediction_accuracy
+        ''')
+        
+        accuracy_stats = cursor.fetchall()
+        
+        # Performance by confidence level
+        cursor.execute('''
+            SELECT 
+                CASE 
+                    WHEN t.side_confidence >= 0.9 THEN 'Very High (90%+)'
+                    WHEN t.side_confidence >= 0.8 THEN 'High (80-89%)'
+                    WHEN t.side_confidence >= 0.7 THEN 'Medium-High (70-79%)'
+                    ELSE 'Other'
+                END as confidence_level,
+                COUNT(*) as total_trades,
+                SUM(CASE WHEN r.prediction_accuracy LIKE 'Correct%' THEN 1 ELSE 0 END) as correct_predictions,
+                AVG(ABS(r.oi_change_pct)) as avg_abs_oi_change
+            FROM tracked_trades t
+            JOIN tracking_results r ON t.id = r.tracked_trade_id
+            GROUP BY confidence_level
+        ''')
+        
+        confidence_performance = cursor.fetchall()
+        
+        # Performance by trade side
+        cursor.execute('''
+            SELECT 
+                CASE 
+                    WHEN t.enhanced_side LIKE '%BUY%' THEN 'BUY'
+                    WHEN t.enhanced_side LIKE '%SELL%' THEN 'SELL'
+                    ELSE 'OTHER'
+                END as trade_side,
+                COUNT(*) as total_trades,
+                SUM(CASE WHEN r.prediction_accuracy LIKE 'Correct%' THEN 1 ELSE 0 END) as correct_predictions,
+                AVG(r.oi_change_pct) as avg_oi_change_pct
+            FROM tracked_trades t
+            JOIN tracking_results r ON t.id = r.tracked_trade_id
+            GROUP BY trade_side
+        ''')
+        
+        side_performance = cursor.fetchall()
+        
+        conn.close()
+        
+        return {
+            'accuracy_stats': accuracy_stats,
+            'confidence_performance': confidence_performance,
+            'side_performance': side_performance
+        }
+    except Exception:
+        return {
+            'accuracy_stats': [],
+            'confidence_performance': [],
+            'side_performance': []
+        }
+
+def run_oi_tracking_for_trades(trades):
+    """Run OI tracking for a batch of trades and return tracking info"""
+    if not trades:
+        return {"saved": 0, "message": "No trades to track"}
+    
+    # Initialize database
+    init_oi_tracking_db()
+    
+    # Save high-confidence trades
+    saved_count = save_high_confidence_trades(trades)
+    
+    # Get summary of what was saved
+    if saved_count > 0:
+        message = f"🎯 Started tracking {saved_count} high-confidence trades for future OI analysis"
+        
+        # Show breakdown of saved trades
+        high_conf_trades = [t for t in trades if t.get('side_confidence', 0) >= 0.7]
+        buy_count = len([t for t in high_conf_trades if 'BUY' in t.get('enhanced_side', '')])
+        sell_count = len([t for t in high_conf_trades if 'SELL' in t.get('enhanced_side', '')])
+        
+        breakdown = f"📊 Breakdown: {buy_count} BUY trades, {sell_count} SELL trades"
+        
+        return {
+            "saved": saved_count,
+            "message": message,
+            "breakdown": breakdown,
+            "high_conf_trades": high_conf_trades
+        }
+    else:
+        return {
+            "saved": 0,
+            "message": "⚠️ No high-confidence trades found to track (need 70%+ confidence)",
+            "breakdown": f"Total trades analyzed: {len(trades)}"
+        }
+
+def display_oi_tracking_dashboard():
+    """Display the OI tracking dashboard"""
+    st.markdown("### 📊 Open Interest Tracking Dashboard")
+    st.markdown("*Track whether high-confidence trades actually result in OI changes*")
+    
+    # Initialize database if needed
+    init_oi_tracking_db()
+    
+    try:
+        # Get current tracking statistics
+        conn = sqlite3.connect('oi_tracking.db')
+        cursor = conn.cursor()
+        
+        # Summary metrics
+        cursor.execute('SELECT COUNT(*) FROM tracked_trades WHERE expiry >= DATE("now")')
+        active_trades = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM tracking_results')
+        tracked_results = cursor.fetchone()[0]
+        
+        cursor.execute('''
+            SELECT COUNT(*) FROM tracking_results 
+            WHERE prediction_accuracy LIKE "Correct%"
+        ''')
+        correct_predictions = cursor.fetchone()[0]
+        
+        accuracy_rate = (correct_predictions / max(tracked_results, 1)) * 100
+        
+        # Display summary metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Active Tracks", active_trades)
+        with col2:
+            st.metric("Total Results", tracked_results)
+        with col3:
+            st.metric("Correct Predictions", correct_predictions)
+        with col4:
+            st.metric("Accuracy Rate", f"{accuracy_rate:.1f}%")
+        
+        # Performance metrics
+        if tracked_results > 0:
+            metrics = get_tracking_performance_metrics()
+            
+            st.markdown("#### 🎯 Prediction Performance Analysis")
+            
+            # Accuracy breakdown
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**Prediction Accuracy Breakdown:**")
+                if metrics['accuracy_stats']:
+                    accuracy_df = pd.DataFrame(metrics['accuracy_stats'], 
+                                             columns=['Prediction Result', 'Count', 'Avg OI Change %'])
+                    st.dataframe(accuracy_df, use_container_width=True)
+                else:
+                    st.info("No accuracy data available yet")
+            
+            with col2:
+                st.markdown("**Performance by Confidence Level:**")
+                if metrics['confidence_performance']:
+                    conf_df = pd.DataFrame(metrics['confidence_performance'], 
+                                         columns=['Confidence Level', 'Total Trades', 'Correct', 'Avg OI Change %'])
+                    conf_df['Accuracy %'] = (conf_df['Correct'] / conf_df['Total Trades'] * 100).round(1)
+                    st.dataframe(conf_df, use_container_width=True)
+                else:
+                    st.info("No confidence performance data available yet")
+            
+            # Performance by trade side
+            st.markdown("**Performance by Trade Side:**")
+            if metrics['side_performance']:
+                side_df = pd.DataFrame(metrics['side_performance'], 
+                                     columns=['Trade Side', 'Total Trades', 'Correct', 'Avg OI Change %'])
+                side_df['Accuracy %'] = (side_df['Correct'] / side_df['Total Trades'] * 100).round(1)
+                st.dataframe(side_df, use_container_width=True)
+            else:
+                st.info("No side performance data available yet")
+        
+        else:
+            st.info("📊 No tracking results available yet. Start by saving some high-confidence trades!")
+            st.markdown("""
+            ### 🎯 How OI Tracking Works:
+            
+            1. **Auto-Save High-Confidence Trades**: Trades with 70%+ confidence are automatically saved
+            2. **OI Predictions**: System predicts OI changes based on volume/OI ratios and trade direction
+            3. **Future Validation**: Track actual OI changes to validate our buy/sell detection
+            4. **Performance Analysis**: Measure accuracy over time to improve the system
+            
+            **Prediction Categories:**
+            - 🚀 **Major Increase**: Vol/OI > 5x + BUY (expect 50%+ OI increase)
+            - 📈 **Moderate Increase**: Vol/OI 2-5x + BUY (expect 10-50% increase)
+            - ⬆️ **Small Increase**: BUY + volume >100 (expect <10% increase)
+            - ⬇️ **Decrease**: SELL + low Vol/OI (expect OI decrease)
+            - ➡️ **Minimal Change**: Mixed signals (expect <5% change)
+            """)
+        
+        # Recent tracked trades
+        st.markdown("#### 📈 Recently Tracked High-Confidence Trades")
+        
+        cursor.execute('''
+            SELECT 
+                ticker, option_chain, enhanced_side, side_confidence, 
+                predicted_oi_change, premium, volume, initial_oi,
+                trade_date, scenarios
+            FROM tracked_trades 
+            WHERE expiry >= DATE("now")
+            ORDER BY created_at DESC 
+            LIMIT 15
+        ''')
+        
+        recent_tracked = cursor.fetchall()
+        
+        if recent_tracked:
+            tracked_data = []
+            for trade in recent_tracked:
+                # Side emoji
+                if "BUY" in trade[2]:
+                    side_emoji = "🟢"
+                elif "SELL" in trade[2]:
+                    side_emoji = "🔴"  
+                else:
+                    side_emoji = "⚪"
+                
+                # Prediction emoji
+                prediction = trade[4]
+                if "Major Increase" in prediction:
+                    pred_emoji = "🚀"
+                elif "Moderate Increase" in prediction:
+                    pred_emoji = "📈"
+                elif "Small Increase" in prediction:
+                    pred_emoji = "⬆️"
+                elif "Decrease" in prediction:
+                    pred_emoji = "⬇️"
+                else:
+                    pred_emoji = "➡️"
+                
+                tracked_data.append({
+                    'Ticker': trade[0],
+                    'Option': trade[1][:20] + "..." if len(trade[1]) > 20 else trade[1],
+                    'Side': f"{side_emoji} {trade[2]}",
+                    'Confidence': f"{trade[3]:.0%}",
+                    'Prediction': f"{pred_emoji} {prediction}",
+                    'Premium': f"${trade[5]:,.0f}",
+                    'Volume': f"{trade[6]:,}",
+                    'Initial OI': f"{trade[7]:,}",
+                    'Date': trade[8],
+                    'Key Scenario': trade[9].split(',')[0] if trade[9] else 'N/A'
+                })
+            
+            tracked_df = pd.DataFrame(tracked_data)
+            st.dataframe(tracked_df, use_container_width=True)
+        else:
+            st.info("No high-confidence trades tracked yet. Run a scan to start tracking!")
+        
+        conn.close()
+        
+    except Exception as e:
+        st.error(f"Error accessing tracking database: {e}")
+        st.info("The tracking database will be created automatically when you first save high-confidence trades.")
+
+# --- END OI TRACKING SYSTEM ---
 def determine_trade_side_enhanced(trade_data, debug=False):
     """
     Enhanced trade side determination with debugging and confidence scoring
@@ -2055,7 +2460,8 @@ with st.sidebar:
             "🔄 Enhanced Buy/Sell Analysis",
             "🚨 Enhanced Alert System",
             "⚡ ETF Flow Scanner",
-            "🎯 Pattern Recognition"
+            "🎯 Pattern Recognition",
+            "📊 OI Tracking Dashboard"  # New option
         ]
     )
     
@@ -2136,7 +2542,11 @@ with st.sidebar:
 
 if run_scan:
     with st.spinner(f"Running {scan_type}..."):
-        if "ETF Flow Scanner" in scan_type:
+        if "OI Tracking Dashboard" in scan_type:
+            # OI Tracking Dashboard
+            display_oi_tracking_dashboard()
+            
+        elif "ETF Flow Scanner" in scan_type:
             # ETF scanner uses its own data fetch
             trades = fetch_etf_trades()
             # Apply filters to ETF trades
@@ -2157,6 +2567,13 @@ if run_scan:
                 st.warning("⚠️ No ETF trades match your current filters. Try adjusting the filters.")
             else:
                 display_etf_scanner(trades)
+                
+                # Auto-save high-confidence trades for OI tracking
+                tracking_info = run_oi_tracking_for_trades(trades)
+                if tracking_info['saved'] > 0:
+                    st.success(tracking_info['message'])
+                    st.info(tracking_info['breakdown'])
+                
                 with st.expander("💾 Export Data", expanded=False):
                     save_to_csv(trades, "enhanced_etf_flow_scanner")
         else:
@@ -2182,6 +2599,14 @@ if run_scan:
             else:
                 # Display enhanced summary for all scan types
                 display_enhanced_summary(trades)
+                
+                # Auto-save high-confidence trades for OI tracking (for all scan types)
+                tracking_info = run_oi_tracking_for_trades(trades)
+                if tracking_info['saved'] > 0:
+                    with st.container():
+                        st.success(tracking_info['message'])
+                        st.info(tracking_info['breakdown'])
+                        st.caption("💡 These trades will be monitored for OI changes. Check the 'OI Tracking Dashboard' to see results!")
                 
                 if "Main Flow" in scan_type:
                     display_main_trades_table(trades)
