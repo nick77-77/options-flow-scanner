@@ -2133,7 +2133,7 @@ def display_enhanced_buy_sell_analysis(trades):
             'Premium': f"${trade.get('premium', 0):,.0f}",
             'Vol/OI': f"{trade.get('vol_oi_ratio', 0):.1f}",
             'Moneyness': trade.get('moneyness', 'N/A'),
-            'Expected Move': f"{em_emoji} {expected_move_data.get('move_percentage', 0):.1f}%",
+            'Expected Move': f"{expected_move_data.get('move_percentage', 0):.1f}%",
             'EM Position': f"{em_emoji} {em_position}",
             'Time': trade.get('time_ny', 'N/A')
         })
@@ -2193,221 +2193,255 @@ def display_enhanced_buy_sell_analysis(trades):
                     st.write(f"**Available Data**: Price={trade.get('price')}, Bid={trade.get('bid')}, Ask={trade.get('ask')}")
                     st.write(f"**Volume/OI**: {trade.get('volume')}/{trade.get('open_interest')} (Ratio: {trade.get('vol_oi_ratio', 0):.1f})")
 
-def display_main_trades_table(trades, title="📋 Main Trades Analysis"):
+# --- UNIFIED VIEW FUNCTIONS ---
+def display_main_trades_table(trades, title="📋 Unified Options Flow Analysis"):
     st.markdown(f"### {title}")
     
     if not trades:
         st.info("No trades found")
         return
     
-    # Add tabs for different views
-    tab1, tab2, tab3 = st.tabs(["📊 Moneyness View", "📈 Expected Move View", "🔍 Combined View"])
-    
-    with tab1:
-        display_trades_by_moneyness(trades)
-    
-    with tab2:
-        display_trades_by_expected_move(trades)
-    
-    with tab3:
-        display_trades_combined_view(trades)
+    # Single unified view with all information
+    display_unified_trades_view(trades)
 
-def display_trades_by_moneyness(trades):
-    """Display trades organized by moneyness"""
-    st.markdown("#### 💰 Trades by Moneyness")
-    
-    # Separate calls and puts
-    calls = [t for t in trades if t['type'] == 'C']
-    puts = [t for t in trades if t['type'] == 'P']
-    
-    def create_moneyness_table(trade_list, trade_type_name):
-        if not trade_list:
-            st.info(f"No {trade_type_name.lower()} found")
-            return
-        
-        # Sort by premium descending
-        sorted_trades = sorted(trade_list, key=lambda x: x.get('premium', 0), reverse=True)
-        
-        table_data = []
-        for trade in sorted_trades[:25]:  # Show top 25 per section
-            oi_analysis = trade.get('oi_analysis', {})
-            enhanced_side = trade.get('enhanced_side', 'UNKNOWN')
-            confidence = trade.get('side_confidence', 0)
-            
-            # Side display with confidence indicator
-            if 'BUY' in enhanced_side:
-                side_display = f"🟢 {enhanced_side}"
-            elif 'SELL' in enhanced_side:
-                side_display = f"🔴 {enhanced_side}"
-            else:
-                side_display = f"⚪ {enhanced_side}"
-            
-            # Confidence indicator
-            if confidence >= 0.7:
-                conf_indicator = "🟢"
-            elif confidence >= 0.4:
-                conf_indicator = "🟡"
-            else:
-                conf_indicator = "🔴"
-            
-            table_data.append({
-                'Ticker': trade['ticker'],
-                'Side': side_display,
-                'Conf': f"{conf_indicator} {confidence:.0%}",
-                'Strike': f"${trade['strike']:.0f}",
-                'Expiry': trade['expiry'],
-                'DTE': trade['dte'],
-                'Premium': f"${trade['premium']:,.0f}",
-                'Volume': f"{trade['volume']:,}",
-                'OI': f"{trade['open_interest']:,}",
-                'Vol/OI': f"{trade['vol_oi_ratio']:.1f}",
-                'Moneyness': trade['moneyness'],
-                'IV': trade['iv_percentage'],
-                'Primary Scenario': trade.get('scenarios', ['Normal Flow'])[0],
-                'Time': trade['time_ny']
-            })
-        
-        df = pd.DataFrame(table_data)
-        st.dataframe(df, use_container_width=True)
-    
-    # Display in two columns
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("#### 🟢 CALLS")
-        create_moneyness_table(calls, "Calls")
-    
-    with col2:
-        st.markdown("#### 🔴 PUTS")
-        create_moneyness_table(puts, "Puts")
-
-def display_trades_by_expected_move(trades):
-    """Display trades organized by expected move position"""
-    st.markdown("#### 📈 Trades by Expected Move Position")
-    
-    # Filter trades with valid expected move data
-    em_trades = [t for t in trades if t.get('expected_move_data', {}).get('expected_move', 0) > 0]
-    
-    if not em_trades:
-        st.info("No trades with valid expected move data found")
-        return
-    
-    # Group by expected move position
-    above_em = [t for t in em_trades if 'Above Expected Move' in t.get('expected_move_analysis', {}).get('position', '')]
-    below_em = [t for t in em_trades if 'Below Expected Move' in t.get('expected_move_analysis', {}).get('position', '')]
-    within_em = [t for t in em_trades if 'Within Expected Move' in t.get('expected_move_analysis', {}).get('position', '')]
-    
-    def create_em_table(trade_list, position_name, emoji):
-        if not trade_list:
-            st.info(f"No trades {position_name}")
-            return
-        
-        st.markdown(f"#### {emoji} {position_name} ({len(trade_list)} trades)")
-        
-        # Sort by distance from expected move
-        sorted_trades = sorted(trade_list, key=lambda x: x.get('expected_move_analysis', {}).get('distance_pct', 0), reverse=True)
-        
-        table_data = []
-        for trade in sorted_trades[:15]:  # Show top 15 per category
-            enhanced_side = trade.get('enhanced_side', 'UNKNOWN')
-            confidence = trade.get('side_confidence', 0)
-            em_analysis = trade.get('expected_move_analysis', {})
-            em_data = trade.get('expected_move_data', {})
-            
-            # Side display
-            if 'BUY' in enhanced_side:
-                side_display = f"🟢 {enhanced_side}"
-            elif 'SELL' in enhanced_side:
-                side_display = f"🔴 {enhanced_side}"
-            else:
-                side_display = f"⚪ {enhanced_side}"
-            
-            table_data.append({
-                'Ticker': trade['ticker'],
-                'Type': trade['type'],
-                'Side': side_display,
-                'Conf': f"{confidence:.0%}",
-                'Strike': f"${trade['strike']:.0f}",
-                'DTE': trade['dte'],
-                'Premium': f"${trade['premium']:,.0f}",
-                'Expected Move': f"±{em_data.get('move_percentage', 0):.1f}%",
-                'Distance': f"{em_analysis.get('distance_pct', 0):.1f}%",
-                'Probability': em_analysis.get('probability', 'Unknown'),
-                'Analysis': em_analysis.get('analysis', 'N/A')[:50] + "..." if len(em_analysis.get('analysis', 'N/A')) > 50 else em_analysis.get('analysis', 'N/A'),
-                'Time': trade['time_ny']
-            })
-        
-        df = pd.DataFrame(table_data)
-        st.dataframe(df, use_container_width=True)
-    
-    # Display each category
-    create_em_table(above_em, "Above Expected Move", "🚀")
-    create_em_table(below_em, "Below Expected Move", "⬇️")
-    create_em_table(within_em, "Within Expected Move", "🎯")
-
-def display_trades_combined_view(trades):
-    """Display trades with both moneyness and expected move information"""
-    st.markdown("#### 🔍 Combined Moneyness & Expected Move View")
+def display_unified_trades_view(trades):
+    """Display all trades in one comprehensive table with all data"""
+    st.markdown("#### 📊 Complete Options Flow Analysis")
     
     if not trades:
         st.info("No trades found")
         return
     
-    # Sort by premium descending
+    # Sort by premium descending to show largest trades first
     sorted_trades = sorted(trades, key=lambda x: x.get('premium', 0), reverse=True)
     
+    # Create comprehensive table data
     table_data = []
-    for trade in sorted_trades[:30]:  # Show top 30 trades
+    for trade in sorted_trades[:50]:  # Show top 50 trades
         enhanced_side = trade.get('enhanced_side', 'UNKNOWN')
         confidence = trade.get('side_confidence', 0)
         em_analysis = trade.get('expected_move_analysis', {})
         em_data = trade.get('expected_move_data', {})
+        oi_analysis = trade.get('oi_analysis', {})
         
         # Side display with confidence
         if 'BUY' in enhanced_side:
-            side_display = f"🟢 {enhanced_side}"
+            side_display = f"🟢 BUY"
         elif 'SELL' in enhanced_side:
-            side_display = f"🔴 {enhanced_side}"
+            side_display = f"🔴 SELL"
         else:
-            side_display = f"⚪ {enhanced_side}"
+            side_display = f"⚪ UNKNOWN"
+        
+        # Confidence indicator
+        if confidence >= 0.7:
+            conf_indicator = "🟢"
+        elif confidence >= 0.4:
+            conf_indicator = "🟡"
+        else:
+            conf_indicator = "🔴"
         
         # Expected Move position emoji
         em_position = em_analysis.get('position', 'Unknown')
         if 'Above Expected Move' in em_position:
             em_emoji = "🚀"
+            em_short = "Above EM"
         elif 'Below Expected Move' in em_position:
             em_emoji = "⬇️"
+            em_short = "Below EM"
         elif 'Within Expected Move' in em_position:
             em_emoji = "🎯"
+            em_short = "Within EM"
+        elif 'ITM' in em_position:
+            em_emoji = "💰"
+            em_short = "ITM"
         else:
             em_emoji = "❓"
+            em_short = "Unknown"
+        
+        # Get option price (what it was bought/sold at)
+        option_price = trade.get('price', 'N/A')
+        if option_price != 'N/A':
+            try:
+                option_price = float(option_price)
+                price_display = f"${option_price:.2f}"
+            except (ValueError, TypeError):
+                price_display = "N/A"
+        else:
+            price_display = "N/A"
+        
+        # Calculate contract premium (price × volume × 100)
+        if option_price != 'N/A' and option_price != "N/A":
+            try:
+                volume = float(trade.get('volume', 0))
+                contract_premium = option_price * volume * 100
+                contract_premium_display = f"${contract_premium:,.0f}"
+            except (ValueError, TypeError):
+                contract_premium_display = "N/A"
+        else:
+            contract_premium_display = f"${trade.get('premium', 0):,.0f}"
         
         table_data.append({
-            'Ticker': trade['ticker'],
-            'Type': trade['type'],
+            'Ticker': trade.get('ticker', ''),
+            'Type': trade.get('type', ''),
+            'Strike': f"${trade.get('strike', 0):.0f}",
+            'Option Price': price_display,
             'Side': side_display,
-            'Conf': f"{confidence:.0%}",
-            'Strike': f"${trade['strike']:.0f}",
-            'DTE': trade['dte'],
-            'Premium': f"${trade['premium']:,.0f}",
+            'Confidence': f"{conf_indicator} {confidence:.0%}",
+            'Volume': f"{trade.get('volume', 0):,}",
+            'Contract Premium': contract_premium_display,
             'Moneyness': trade.get('moneyness', 'N/A'),
             'Expected Move': f"±{em_data.get('move_percentage', 0):.1f}%",
-            'EM Position': f"{em_emoji} {em_position}",
+            'EM Position': f"{em_emoji} {em_short}",
             'Probability': em_analysis.get('probability', 'Unknown'),
+            'DTE': trade.get('dte', 0),
+            'Expiry': trade.get('expiry', 'N/A'),
+            'OI': f"{trade.get('open_interest', 0):,}",
             'Vol/OI': f"{trade.get('vol_oi_ratio', 0):.1f}",
+            'IV': trade.get('iv_percentage', 'N/A'),
+            'OI Level': oi_analysis.get('oi_level', 'N/A'),
+            'Liquidity': oi_analysis.get('liquidity_score', 'N/A'),
             'Primary Scenario': trade.get('scenarios', ['Normal Flow'])[0],
             'Time': trade.get('time_ny', 'N/A')
         })
     
+    # Display the unified table
     df = pd.DataFrame(table_data)
     st.dataframe(df, use_container_width=True)
     
-    # Add Short-Term ETF section after main table
+    # Add key statistics below the table
+    st.markdown("#### 📊 Summary Statistics")
+    
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        total_premium = sum(trade.get('premium', 0) for trade in sorted_trades)
+        st.metric("Total Premium", f"${total_premium:,.0f}")
+    
+    with col2:
+        buy_trades = len([t for t in sorted_trades if 'BUY' in t.get('enhanced_side', '')])
+        sell_trades = len([t for t in sorted_trades if 'SELL' in t.get('enhanced_side', '')])
+        st.metric("Buy/Sell Ratio", f"{buy_trades}/{sell_trades}")
+    
+    with col3:
+        avg_confidence = np.mean([t.get('side_confidence', 0) for t in sorted_trades]) if sorted_trades else 0
+        st.metric("Avg Confidence", f"{avg_confidence:.0%}")
+    
+    with col4:
+        em_trades = [t for t in sorted_trades if t.get('expected_move_data', {}).get('move_percentage', 0) > 0]
+        avg_em = np.mean([t['expected_move_data']['move_percentage'] for t in em_trades]) if em_trades else 0
+        st.metric("Avg Expected Move", f"±{avg_em:.1f}%")
+    
+    with col5:
+        high_conf_trades = len([t for t in sorted_trades if t.get('side_confidence', 0) >= 0.7])
+        st.metric("High Confidence Trades", high_conf_trades)
+    
+    # Expected Move breakdown
+    col1, col2, col3 = st.columns(3)
+    
+    em_trades = [t for t in sorted_trades if t.get('expected_move_data', {}).get('move_percentage', 0) > 0]
+    above_em = len([t for t in em_trades if 'Above Expected Move' in t.get('expected_move_analysis', {}).get('position', '')])
+    below_em = len([t for t in em_trades if 'Below Expected Move' in t.get('expected_move_analysis', {}).get('position', '')])
+    within_em = len([t for t in em_trades if 'Within Expected Move' in t.get('expected_move_analysis', {}).get('position', '')])
+    
+    with col1:
+        st.metric("🚀 Above Expected Move", above_em)
+    
+    with col2:
+        st.metric("🎯 Within Expected Move", within_em)
+    
+    with col3:
+        st.metric("⬇️ Below Expected Move", below_em)
+    
+    # Most active strikes with pricing information
+    st.markdown("#### 🎯 Most Active Strikes")
+    
+    strike_activity = {}
+    for trade in sorted_trades[:30]:  # Top 30 trades for strike analysis
+        key = f"{trade.get('ticker', '')} ${trade.get('strike', 0):.0f}{trade.get('type', '')}"
+        if key not in strike_activity:
+            strike_activity[key] = {
+                'count': 0, 
+                'total_premium': 0, 
+                'total_volume': 0, 
+                'buy_count': 0,
+                'avg_price': 0,
+                'price_sum': 0,
+                'price_count': 0,
+                'em_positions': []
+            }
+        
+        strike_activity[key]['count'] += 1
+        strike_activity[key]['total_premium'] += trade.get('premium', 0)
+        strike_activity[key]['total_volume'] += trade.get('volume', 0)
+        
+        if 'BUY' in trade.get('enhanced_side', ''):
+            strike_activity[key]['buy_count'] += 1
+        
+        # Track option prices
+        option_price = trade.get('price', 'N/A')
+        if option_price != 'N/A':
+            try:
+                price_val = float(option_price)
+                strike_activity[key]['price_sum'] += price_val
+                strike_activity[key]['price_count'] += 1
+            except (ValueError, TypeError):
+                pass
+        
+        # Track EM positions
+        em_analysis = trade.get('expected_move_analysis', {})
+        if em_analysis.get('position'):
+            strike_activity[key]['em_positions'].append(em_analysis['position'])
+    
+    # Calculate averages
+    for key, data in strike_activity.items():
+        if data['price_count'] > 0:
+            data['avg_price'] = data['price_sum'] / data['price_count']
+        
+        if data['em_positions']:
+            from collections import Counter
+            data['most_common_em_position'] = Counter(data['em_positions']).most_common(1)[0][0]
+        else:
+            data['most_common_em_position'] = 'Unknown'
+    
+    # Sort by total premium and show top strikes
+    top_strikes = sorted(strike_activity.items(), 
+                        key=lambda x: x[1]['total_premium'], reverse=True)[:8]
+    
+    if top_strikes:
+        col1, col2 = st.columns(2)
+        
+        for i, (strike_key, data) in enumerate(top_strikes):
+            col = col1 if i % 2 == 0 else col2
+            buy_ratio = data['buy_count'] / data['count'] if data['count'] > 0 else 0
+            sentiment_emoji = "🟢" if buy_ratio > 0.6 else "🔴" if buy_ratio < 0.4 else "⚪"
+            
+            # EM position emoji
+            em_position = data['most_common_em_position']
+            if 'Above Expected Move' in em_position:
+                em_emoji = "🚀"
+            elif 'Below Expected Move' in em_position:
+                em_emoji = "⬇️"
+            elif 'Within Expected Move' in em_position:
+                em_emoji = "🎯"
+            else:
+                em_emoji = "❓"
+            
+            with col:
+                st.write(f"**{strike_key}** {sentiment_emoji} {em_emoji}")
+                st.write(f"💰 ${data['total_premium']:,.0f} premium")
+                st.write(f"📊 {data['total_volume']:,.0f} volume | {data['count']} trades")
+                st.write(f"🟢 {buy_ratio:.0%} buys")
+                if data['avg_price'] > 0:
+                    st.write(f"💵 Avg Price: ${data['avg_price']:.2f}")
+                st.write(f"📈 {data['most_common_em_position']}")
+                st.write("")  # Add spacing
+    
+    # Add Short-Term ETF section after main analysis
     st.divider()
-    display_short_term_etf_section(trades)
+    display_short_term_etf_unified_section(sorted_trades)
 
-def display_short_term_etf_section(all_trades):
-    """Display short-term ETF section as part of main analysis"""
+def display_short_term_etf_unified_section(all_trades):
+    """Display short-term ETF section with unified table format"""
     st.markdown("### ⚡ Short-Term ETF Focus (SPY/QQQ/IWM ≤ 7 DTE)")
     
     # Filter for short-term ETF trades
@@ -2416,14 +2450,14 @@ def display_short_term_etf_section(all_trades):
     
     etf_trades = [
         t for t in all_trades 
-        if t['ticker'] in allowed_tickers and t.get('dte', 0) <= max_dte
+        if t.get('ticker', '') in allowed_tickers and t.get('dte', 0) <= max_dte
     ]
     
     if not etf_trades:
         st.info("No short-term ETF trades found in current dataset")
         return
     
-    # Quick stats including Expected Move
+    # Quick ETF stats
     col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
@@ -2444,101 +2478,111 @@ def display_short_term_etf_section(all_trades):
         st.metric("Avg Confidence", f"{avg_confidence:.0%}")
     
     with col5:
-        avg_em = np.mean([t.get('expected_move_data', {}).get('move_percentage', 0) for t in etf_trades if t.get('expected_move_data', {}).get('move_percentage', 0) > 0])
-        st.metric("Avg Expected Move", f"{avg_em:.1f}%" if avg_em > 0 else "N/A")
+        em_etf_trades = [t for t in etf_trades if t.get('expected_move_data', {}).get('move_percentage', 0) > 0]
+        avg_em = np.mean([t['expected_move_data']['move_percentage'] for t in em_etf_trades]) if em_etf_trades else 0
+        st.metric("Avg Expected Move", f"±{avg_em:.1f}%" if avg_em > 0 else "N/A")
     
-    # Create ETF table with Expected Move
-    def create_etf_summary_table(trades):
-        if not trades:
-            return
+    # Create unified ETF table
+    if etf_trades:
+        st.markdown("#### 📊 Short-Term ETF Trades")
         
-        # Sort by premium descending
-        sorted_trades = sorted(trades, key=lambda x: x.get('premium', 0), reverse=True)
-        
-        table_data = []
-        for trade in sorted_trades[:15]:  # Top 15 ETF trades
+        etf_table_data = []
+        for trade in etf_trades[:20]:  # Top 20 ETF trades
             enhanced_side = trade.get('enhanced_side', 'UNKNOWN')
             confidence = trade.get('side_confidence', 0)
             em_analysis = trade.get('expected_move_analysis', {})
             em_data = trade.get('expected_move_data', {})
             
-            # Side display with emoji
+            # Side display
             if 'BUY' in enhanced_side:
-                side_display = f"🟢 {enhanced_side}"
+                side_display = f"🟢 BUY"
             elif 'SELL' in enhanced_side:
-                side_display = f"🔴 {enhanced_side}"
+                side_display = f"🔴 SELL"
             else:
-                side_display = f"⚪ {enhanced_side}"
+                side_display = f"⚪ UNKNOWN"
             
-            # Expected Move position emoji
+            # Confidence indicator
+            if confidence >= 0.7:
+                conf_indicator = "🟢"
+            elif confidence >= 0.4:
+                conf_indicator = "🟡"
+            else:
+                conf_indicator = "🔴"
+            
+            # Expected Move position
             em_position = em_analysis.get('position', 'Unknown')
             if 'Above Expected Move' in em_position:
                 em_emoji = "🚀"
+                em_short = "Above EM"
             elif 'Below Expected Move' in em_position:
                 em_emoji = "⬇️"
+                em_short = "Below EM"
             elif 'Within Expected Move' in em_position:
                 em_emoji = "🎯"
+                em_short = "Within EM"
+            elif 'ITM' in em_position:
+                em_emoji = "💰"
+                em_short = "ITM"
             else:
                 em_emoji = "❓"
+                em_short = "Unknown"
             
-            table_data.append({
-                'Ticker': trade['ticker'],
-                'Type': trade['type'],
+            # Option price
+            option_price = trade.get('price', 'N/A')
+            if option_price != 'N/A':
+                try:
+                    option_price = float(option_price)
+                    price_display = f"${option_price:.2f}"
+                except (ValueError, TypeError):
+                    price_display = "N/A"
+            else:
+                price_display = "N/A"
+            
+            etf_table_data.append({
+                'ETF': trade.get('ticker', ''),
+                'Type': trade.get('type', ''),
+                'Strike': f"${trade.get('strike', 0):.0f}",
+                'Option Price': price_display,
                 'Side': side_display,
-                'Conf': f"{confidence:.0%}",
-                'Strike': f"${trade['strike']:.0f}",
-                'DTE': trade.get('dte', 0),
+                'Conf': f"{conf_indicator} {confidence:.0%}",
+                'Volume': f"{trade.get('volume', 0):,}",
                 'Premium': f"${trade.get('premium', 0):,.0f}",
+                'DTE': trade.get('dte', 0),
                 'Moneyness': trade.get('moneyness', 'N/A'),
                 'Expected Move': f"±{em_data.get('move_percentage', 0):.1f}%",
-                'EM Position': f"{em_emoji} {em_position}",
+                'EM Position': f"{em_emoji} {em_short}",
                 'Vol/OI': f"{trade.get('vol_oi_ratio', 0):.1f}",
-                'Primary Scenario': trade.get('scenarios', ['Normal Flow'])[0],
                 'Time': trade.get('time_ny', 'N/A')
             })
         
-        df = pd.DataFrame(table_data)
-        st.dataframe(df, use_container_width=True)
+        etf_df = pd.DataFrame(etf_table_data)
+        st.dataframe(etf_df, use_container_width=True)
     
-    create_etf_summary_table(etf_trades)
-    
-    # Expected Move insights for ETFs
-    em_etf_trades = [t for t in etf_trades if t.get('expected_move_data', {}).get('expected_move', 0) > 0]
-    if em_etf_trades:
-        st.markdown("#### 📊 ETF Expected Move Insights")
+    # 0DTE focus with pricing
+    zero_dte_trades = [t for t in etf_trades if t.get('dte', 0) == 0]
+    if zero_dte_trades:
+        st.markdown("#### ⚡ 0DTE Spotlight")
         
-        above_em_etf = len([t for t in em_etf_trades if 'Above Expected Move' in t.get('expected_move_analysis', {}).get('position', '')])
-        below_em_etf = len([t for t in em_etf_trades if 'Below Expected Move' in t.get('expected_move_analysis', {}).get('position', '')])
-        within_em_etf = len([t for t in em_etf_trades if 'Within Expected Move' in t.get('expected_move_analysis', {}).get('position', '')])
+        st.write("**Top 0DTE Trades:**")
+        top_0dte = sorted(zero_dte_trades, key=lambda x: x.get('premium', 0), reverse=True)[:5]
         
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("🚀 Above EM", above_em_etf)
-        with col2:
-            st.metric("🎯 Within EM", within_em_etf)
-        with col3:
-            st.metric("⬇️ Below EM", below_em_etf)
-        
-        # Show most extreme expected move positions
-        extreme_em_trades = sorted(em_etf_trades, 
-                                 key=lambda x: x.get('expected_move_analysis', {}).get('distance_pct', 0), 
-                                 reverse=True)[:5]
-        
-        if extreme_em_trades:
-            st.markdown("**🎯 Most Extreme Expected Move Positions:**")
-            for i, trade in enumerate(extreme_em_trades, 1):
-                em_analysis = trade.get('expected_move_analysis', {})
-                enhanced_side = trade.get('enhanced_side', 'UNKNOWN')
-                
-                if 'BUY' in enhanced_side:
-                    side_indicator = "🟢"
-                elif 'SELL' in enhanced_side:
-                    side_indicator = "🔴"
-                else:
-                    side_indicator = "⚪"
-                
-                st.write(f"{i}. {side_indicator} {trade['ticker']} {trade['strike']:.0f}{trade['type']} - "
-                        f"${trade['premium']:,.0f} - {em_analysis.get('analysis', 'N/A')}")
+        for i, trade in enumerate(top_0dte, 1):
+            enhanced_side = trade.get('enhanced_side', 'UNKNOWN')
+            confidence = trade.get('side_confidence', 0)
+            
+            if 'BUY' in enhanced_side:
+                side_indicator = "🟢"
+            elif 'SELL' in enhanced_side:
+                side_indicator = "🔴"
+            else:
+                side_indicator = "⚪"
+            
+            option_price = trade.get('price', 'N/A')
+            price_display = f"${float(option_price):.2f}" if option_price != 'N/A' else "N/A"
+            
+            st.write(f"{i}. {side_indicator} {trade.get('ticker', '')} {trade.get('strike', 0):.0f}{trade.get('type', '')} - "
+                    f"${trade.get('premium', 0):,.0f} | Price: {price_display} | "
+                    f"{enhanced_side} ({confidence:.0%})")
 
 def display_etf_scanner(trades):
     """Display the dedicated ETF scanner section"""
@@ -2548,6 +2592,11 @@ def display_etf_scanner(trades):
         st.warning("No ETF trades found")
         return
     
+    # Use unified view for ETF scanner as well
+    display_unified_etf_view(trades)
+
+def display_unified_etf_view(trades):
+    """Display ETF trades in unified format"""
     # Summary metrics including Expected Move
     col1, col2, col3, col4, col5 = st.columns(5)
     
@@ -2572,95 +2621,85 @@ def display_etf_scanner(trades):
         em_trades = [t for t in trades if t.get('expected_move_data', {}).get('move_percentage', 0) > 0]
         avg_em = np.mean([t['expected_move_data']['move_percentage'] for t in em_trades]) if em_trades else 0
         st.metric("Avg Expected Move", f"{avg_em:.1f}%" if avg_em > 0 else "N/A")
+
+    # Unified ETF table
+    st.markdown("#### 📊 ETF Options Flow")
     
-    # Separate by ETF
-    spy_trades = [t for t in trades if t['ticker'] == 'SPY']
-    qqq_trades = [t for t in trades if t['ticker'] == 'QQQ']
-    iwm_trades = [t for t in trades if t['ticker'] == 'IWM']
+    # Sort by premium descending
+    sorted_trades = sorted(trades, key=lambda x: x['premium'], reverse=True)
     
-    def create_etf_table(ticker_trades, ticker_name):
-        if not ticker_trades:
-            st.info(f"No {ticker_name} trades found")
-            return
+    table_data = []
+    for trade in sorted_trades[:30]:  # Top 30 ETF trades
+        enhanced_side = trade.get('enhanced_side', 'UNKNOWN')
+        confidence = trade.get('side_confidence', 0)
+        em_analysis = trade.get('expected_move_analysis', {})
+        em_data = trade.get('expected_move_data', {})
         
-        # Sort by premium descending
-        sorted_trades = sorted(ticker_trades, key=lambda x: x['premium'], reverse=True)
+        # Side display with confidence
+        if 'BUY' in enhanced_side:
+            side_display = f"🟢 BUY"
+        elif 'SELL' in enhanced_side:
+            side_display = f"🔴 SELL"
+        else:
+            side_display = f"⚪ UNKNOWN"
         
-        table_data = []
-        for trade in sorted_trades[:20]:  # Top 20 per ETF
-            enhanced_side = trade.get('enhanced_side', 'UNKNOWN')
-            confidence = trade.get('side_confidence', 0)
-            em_analysis = trade.get('expected_move_analysis', {})
-            em_data = trade.get('expected_move_data', {})
-            
-            # Side display with confidence
-            if 'BUY' in enhanced_side:
-                side_display = f"🟢 {enhanced_side}"
-            elif 'SELL' in enhanced_side:
-                side_display = f"🔴 {enhanced_side}"
-            else:
-                side_display = f"⚪ {enhanced_side}"
-            
-            # Expected Move position emoji
-            em_position = em_analysis.get('position', 'Unknown')
-            if 'Above Expected Move' in em_position:
-                em_emoji = "🚀"
-            elif 'Below Expected Move' in em_position:
-                em_emoji = "⬇️"
-            elif 'Within Expected Move' in em_position:
-                em_emoji = "🎯"
-            else:
-                em_emoji = "❓"
-            
-            table_data.append({
-                'Type': trade['type'],
-                'Side': side_display,
-                'Conf': f"{confidence:.0%}",
-                'Strike': f"${trade['strike']:.0f}",
-                'DTE': trade['dte'],
-                'Premium': f"${trade['premium']:,.0f}",
-                'Moneyness': trade['moneyness'],
-                'Expected Move': f"±{em_data.get('move_percentage', 0):.1f}%",
-                'EM Position': f"{em_emoji} {em_position}",
-                'Vol/OI': f"{trade['vol_oi_ratio']:.1f}",
-                'Time': trade['time_ny']
-            })
+        # Confidence indicator
+        if confidence >= 0.7:
+            conf_indicator = "🟢"
+        elif confidence >= 0.4:
+            conf_indicator = "🟡"
+        else:
+            conf_indicator = "🔴"
         
-        df = pd.DataFrame(table_data)
-        st.dataframe(df, use_container_width=True)
+        # Expected Move position
+        em_position = em_analysis.get('position', 'Unknown')
+        if 'Above Expected Move' in em_position:
+            em_emoji = "🚀"
+            em_short = "Above EM"
+        elif 'Below Expected Move' in em_position:
+            em_emoji = "⬇️"
+            em_short = "Below EM"
+        elif 'Within Expected Move' in em_position:
+            em_emoji = "🎯"
+            em_short = "Within EM"
+        elif 'ITM' in em_position:
+            em_emoji = "💰"
+            em_short = "ITM"
+        else:
+            em_emoji = "❓"
+            em_short = "Unknown"
+        
+        # Option price
+        option_price = trade.get('price', 'N/A')
+        if option_price != 'N/A':
+            try:
+                option_price = float(option_price)
+                price_display = f"${option_price:.2f}"
+            except (ValueError, TypeError):
+                price_display = "N/A"
+        else:
+            price_display = "N/A"
+        
+        table_data.append({
+            'ETF': trade['ticker'],
+            'Type': trade['type'],
+            'Strike': f"${trade['strike']:.0f}",
+            'Option Price': price_display,
+            'Side': side_display,
+            'Conf': f"{conf_indicator} {confidence:.0%}",
+            'Volume': f"{trade['volume']:,}",
+            'Premium': f"${trade['premium']:,.0f}",
+            'DTE': trade['dte'],
+            'Moneyness': trade['moneyness'],
+            'Expected Move': f"±{em_data.get('move_percentage', 0):.1f}%",
+            'EM Position': f"{em_emoji} {em_short}",
+            'Probability': em_analysis.get('probability', 'Unknown'),
+            'Vol/OI': f"{trade['vol_oi_ratio']:.1f}",
+            'Time': trade['time_ny']
+        })
     
-    # Display each ETF in tabs
-    tab1, tab2, tab3 = st.tabs(["🕷️ SPY", "🔷 QQQ", "🔸 IWM"])
-    
-    with tab1:
-        st.markdown("#### SPY Short-Term Flow")
-        spy_premium = sum(t['premium'] for t in spy_trades)
-        spy_count = len(spy_trades)
-        spy_buy_count = len([t for t in spy_trades if 'BUY' in t.get('enhanced_side', '')])
-        spy_em_trades = [t for t in spy_trades if t.get('expected_move_data', {}).get('move_percentage', 0) > 0]
-        spy_avg_em = np.mean([t['expected_move_data']['move_percentage'] for t in spy_em_trades]) if spy_em_trades else 0
-        st.write(f"**{spy_count} trades | ${spy_premium:,.0f} premium | {spy_buy_count} buys | ±{spy_avg_em:.1f}% avg EM**")
-        create_etf_table(spy_trades, "SPY")
-    
-    with tab2:
-        st.markdown("#### QQQ Short-Term Flow")
-        qqq_premium = sum(t['premium'] for t in qqq_trades)
-        qqq_count = len(qqq_trades)
-        qqq_buy_count = len([t for t in qqq_trades if 'BUY' in t.get('enhanced_side', '')])
-        qqq_em_trades = [t for t in qqq_trades if t.get('expected_move_data', {}).get('move_percentage', 0) > 0]
-        qqq_avg_em = np.mean([t['expected_move_data']['move_percentage'] for t in qqq_em_trades]) if qqq_em_trades else 0
-        st.write(f"**{qqq_count} trades | ${qqq_premium:,.0f} premium | {qqq_buy_count} buys | ±{qqq_avg_em:.1f}% avg EM**")
-        create_etf_table(qqq_trades, "QQQ")
-    
-    with tab3:
-        st.markdown("#### IWM Short-Term Flow")
-        iwm_premium = sum(t['premium'] for t in iwm_trades)
-        iwm_count = len(iwm_trades)
-        iwm_buy_count = len([t for t in iwm_trades if 'BUY' in t.get('enhanced_side', '')])
-        iwm_em_trades = [t for t in iwm_trades if t.get('expected_move_data', {}).get('move_percentage', 0) > 0]
-        iwm_avg_em = np.mean([t['expected_move_data']['move_percentage'] for t in iwm_em_trades]) if iwm_em_trades else 0
-        st.write(f"**{iwm_count} trades | ${iwm_premium:,.0f} premium | {iwm_buy_count} buys | ±{iwm_avg_em:.1f}% avg EM**")
-        create_etf_table(iwm_trades, "IWM")
+    df = pd.DataFrame(table_data)
+    st.dataframe(df, use_container_width=True)
     
     # Expected Move Analysis Section
     st.markdown("#### 📊 Expected Move Analysis")
@@ -2718,47 +2757,56 @@ def display_etf_scanner(trades):
                     st.write(f"💰 ${trade['premium']:,.0f} | ±{trade['expected_move_data']['move_percentage']:.1f}% EM")
                     st.write(f"📊 {em_analysis.get('distance_pct', 0):.1f}% from EM range")
     
-    # Key insights with Expected Move context
-    st.markdown("#### 🔍 Key ETF Insights with Expected Move")
+    # Most active strikes with pricing information
+    st.markdown("#### 🎯 Most Active ETF Strikes")
     
-    # Most active strikes with EM context
     strike_activity = {}
-    for trade in trades:
+    for trade in sorted_trades[:20]:  # Top 20 trades for strike analysis
         key = f"{trade['ticker']} ${trade['strike']:.0f}{trade['type']}"
         if key not in strike_activity:
             strike_activity[key] = {
                 'count': 0, 'total_premium': 0, 'total_volume': 0, 'buy_count': 0,
-                'avg_em': 0, 'em_positions': []
+                'avg_price': 0, 'price_sum': 0, 'price_count': 0, 'em_positions': []
             }
+        
         strike_activity[key]['count'] += 1
         strike_activity[key]['total_premium'] += trade['premium']
         strike_activity[key]['total_volume'] += trade['volume']
+        
         if 'BUY' in trade.get('enhanced_side', ''):
             strike_activity[key]['buy_count'] += 1
         
-        # Add expected move data
-        em_data = trade.get('expected_move_data', {})
+        # Track option prices
+        option_price = trade.get('price', 'N/A')
+        if option_price != 'N/A':
+            try:
+                price_val = float(option_price)
+                strike_activity[key]['price_sum'] += price_val
+                strike_activity[key]['price_count'] += 1
+            except (ValueError, TypeError):
+                pass
+        
+        # Track EM positions
         em_analysis = trade.get('expected_move_analysis', {})
-        if em_data.get('move_percentage', 0) > 0:
-            strike_activity[key]['avg_em'] += em_data['move_percentage']
-            strike_activity[key]['em_positions'].append(em_analysis.get('position', 'Unknown'))
+        if em_analysis.get('position'):
+            strike_activity[key]['em_positions'].append(em_analysis['position'])
     
-    # Calculate averages and most common EM position
+    # Calculate averages
     for key, data in strike_activity.items():
-        if data['count'] > 0:
-            data['avg_em'] = data['avg_em'] / data['count']
-            if data['em_positions']:
-                from collections import Counter
-                data['most_common_em_position'] = Counter(data['em_positions']).most_common(1)[0][0]
-            else:
-                data['most_common_em_position'] = 'Unknown'
+        if data['price_count'] > 0:
+            data['avg_price'] = data['price_sum'] / data['price_count']
+        
+        if data['em_positions']:
+            from collections import Counter
+            data['most_common_em_position'] = Counter(data['em_positions']).most_common(1)[0][0]
+        else:
+            data['most_common_em_position'] = 'Unknown'
     
-    # Sort by total premium
+    # Sort by total premium and show top strikes
     top_strikes = sorted(strike_activity.items(), 
                         key=lambda x: x[1]['total_premium'], reverse=True)[:6]
     
     if top_strikes:
-        st.markdown("**🎯 Most Active ETF Strikes with Expected Move Context:**")
         col1, col2 = st.columns(2)
         
         for i, (strike_key, data) in enumerate(top_strikes):
@@ -2781,8 +2829,9 @@ def display_etf_scanner(trades):
                 st.write(f"**{strike_key}** {sentiment_emoji} {em_emoji}")
                 st.write(f"💰 ${data['total_premium']:,.0f} | 📊 {data['total_volume']:,.0f} vol")
                 st.write(f"🔄 {data['count']} trades | {buy_ratio:.0%} buys")
-                if data['avg_em'] > 0:
-                    st.write(f"📈 ±{data['avg_em']:.1f}% avg EM | {data['most_common_em_position']}")
+                if data['avg_price'] > 0:
+                    st.write(f"💵 Avg Price: ${data['avg_price']:.2f}")
+                st.write(f"📈 {data['most_common_em_position']}")
     
     # 0DTE focus with Expected Move
     zero_dte_trades = [t for t in trades if t['dte'] == 0]
@@ -2832,8 +2881,12 @@ def display_etf_scanner(trades):
             
             em_display = f"±{em_data.get('move_percentage', 0):.1f}% EM {em_emoji}" if em_data.get('move_percentage', 0) > 0 else "No EM data"
             
+            option_price = trade.get('price', 'N/A')
+            price_display = f"${float(option_price):.2f}" if option_price != 'N/A' else "N/A"
+            
             st.write(f"{i}. {side_indicator} {trade['ticker']} {trade['strike']:.0f}{trade['type']} - "
-                    f"${trade['premium']:,.0f} ({enhanced_side}) {conf_indicator} | {em_display}")
+                    f"${trade['premium']:,.0f} | Price: {price_display} | "
+                    f"({enhanced_side}) {conf_indicator} | {em_display}")
 
 def display_open_interest_analysis(trades):
     st.markdown("### 📈 Open Interest Deep Dive")
@@ -3226,9 +3279,28 @@ else:
     st.markdown("""
     ## Welcome to the Enhanced Options Flow Tracker with Expected Move! 👋
     
-    ### 🆕 **NEW: Expected Move Analysis** 📈
+    ### 🆕 **NEW: Unified View with Option Pricing** 📈
     
-    #### 🎯 **What is Expected Move?**
+    #### 🔍 **Single Comprehensive Table:**
+    - **No More Tabs**: All trade information in one powerful table
+    - **Option Price Column**: Shows the actual price each option was bought/sold at
+    - **Contract Premium**: Total dollar amount calculated from price × volume × 100
+    - **Complete Integration**: Moneyness, Expected Move, confidence, and all metrics together
+    
+    #### 💰 **Enhanced Pricing Information:**
+    - **Individual Option Price**: The actual per-contract price (e.g., $2.50)
+    - **Total Position Value**: Complete premium calculation for the entire trade
+    - **Volume Tracking**: Number of contracts traded
+    - **Buy/Sell Context**: See exactly what prices traders paid/received
+    
+    #### 📊 **All Key Data in One View:**
+    - **Trade Direction**: 🟢 BUY / 🔴 SELL / ⚪ UNKNOWN with confidence levels
+    - **Expected Move Position**: 🚀 Above EM / 🎯 Within EM / ⬇️ Below EM / 💰 ITM
+    - **Probability Estimates**: Success likelihood for each position
+    - **Complete Metrics**: Moneyness, DTE, IV, Vol/OI, OI levels, scenarios
+    - **Time Stamps**: When each trade occurred
+    
+    ### 🎯 **What is Expected Move?**
     Expected Move (EM) calculates the theoretical 1-standard deviation price range based on implied volatility:
     
     **Formula**: `EM = Stock Price × IV × √(DTE/365)`
@@ -3242,11 +3314,6 @@ else:
     - **🎯 Within Expected Move**: Strikes within the expected range (Medium probability 16-50%)
     - **⬇️ Below Expected Move**: Strikes betting on extreme moves in opposite direction (Low probability <16%)
     - **💰 ITM Positions**: In-the-money options (High probability >50%)
-    
-    ##### 📈 **Enhanced Trade Tables:**
-    - **Moneyness View**: Traditional ITM/OTM/ATM analysis
-    - **Expected Move View**: Organized by EM position with probability estimates
-    - **Combined View**: Both moneyness and EM data side-by-side
     
     ##### 🎯 **Key Insights:**
     - **Identify unusual bets**: Trades above/below expected move may signal special situations
@@ -3280,79 +3347,47 @@ else:
     ### 📋 **Enhanced Analysis Types:**
     
     #### 🔍 **Main Flow Analysis**
-    - All trades with enhanced buy/sell detection and EM analysis
-    - **Three viewing modes**: Moneyness, Expected Move, and Combined
+    - **Unified comprehensive table** with all trade data including option prices
     - Confidence scoring and reasoning for each trade
+    - Expected Move analysis integrated throughout
     - Short-term ETF focus section with EM context
     
     #### ⚡ **ETF Flow Scanner** ⭐ ENHANCED!
+    - **Complete unified view** for SPY/QQQ/IWM trades ≤ 7 DTE
+    - **Option pricing integration**: See actual prices paid for each contract
     - **Expected Move Integration**: See average EM for each ETF
     - **EM Position Tracking**: Count of trades above/within/below expected move
     - **0DTE EM Analysis**: Special focus on same-day expiration with EM context
     - **Extreme EM Bets**: Highlight most aggressive expected move plays
-    - **Strike Activity with EM**: Most active strikes showing EM position
+    - **Strike Activity with Pricing**: Most active strikes with average option prices
     
     #### 🚨 **Enhanced Alert System**
     - **EM-based scoring**: Higher alerts for strikes far from expected move
     - **Probability integration**: Consider success probability in alerts
     - **Expected move violations**: Flag unusual bets beyond market expectations
+    - **Option pricing context**: See what prices triggered alerts
     
-    ### 📊 **Expected Move Use Cases:**
+    ### 💡 **Pro Tips for the Unified View:**
     
-    #### 🎯 **For Day Traders:**
-    - **0DTE Analysis**: See which strikes are within/outside today's expected move
-    - **Quick Probability**: Instantly assess likelihood of strike being hit
-    - **Momentum Plays**: Identify bets on moves beyond normal expectations
+    1. **Sort by Premium** - Largest trades appear first for immediate focus
+    2. **Check Option Price vs Strike** - Compare what traders paid vs the strike price
+    3. **Expected Move Context** - 🚀 Above EM trades with high premiums may signal events
+    4. **Confidence + EM Position** - High confidence buys far from EM = potential alpha
+    5. **Volume + Price Analysis** - Large volume at specific prices shows conviction
+    6. **Most Active Strikes** - See average prices and sentiment for popular strikes
     
-    #### 📈 **For Options Traders:**
-    - **Strike Selection**: Choose strikes based on probability analysis
-    - **Volatility Assessment**: See if IV is pricing reasonable moves
-    - **Risk Management**: Understand probability distribution of outcomes
+    ### ✨ **What's New in This Unified Version:**
     
-    #### 🔍 **For Market Analysis:**
-    - **Unusual Activity**: Large premiums far from EM may signal events
-    - **Sentiment Analysis**: Are traders betting on big moves or staying conservative?
-    - **Volatility Regime**: Compare actual moves to expected moves over time
+    ✅ **Single Comprehensive Table** - All data in one powerful view  
+    ✅ **Option Price Integration** - See actual per-contract prices paid  
+    ✅ **Contract Premium Calculation** - Total position values displayed  
+    ✅ **Enhanced Strike Analysis** - Average prices for most active strikes  
+    ✅ **Complete EM Integration** - Expected Move data throughout  
+    ✅ **Simplified Navigation** - No more tabs, everything accessible instantly  
+    ✅ **Better CSV Export** - All pricing and EM data included  
+    ✅ **0DTE Pricing Focus** - See exact prices paid for same-day trades  
     
-    ### 💡 **Pro Tips for Expected Move Analysis:**
+    **Ready to see the unified view in action? Select your analysis type and click 'Run Enhanced Scan'!**
     
-    1. **🚀 Above EM trades** with high premiums may signal upcoming events or insider activity
-    2. **🎯 Within EM trades** are more conservative, higher probability plays
-    3. **⬇️ Below EM puts** might indicate extreme hedging or disaster protection
-    4. **0DTE trades** have limited EM accuracy due to time decay acceleration
-    5. **High IV** leads to wider expected moves - consider if realistic
-    6. **Compare across ETFs** - SPY vs QQQ vs IWM expected moves can show sector rotation
-    
-    ### 🛠️ **How Expected Move Enhances Each Feature:**
-    
-    #### 📊 **Enhanced Summary**
-    - **Average Expected Move**: See market's volatility expectation
-    - **EM Position Distribution**: Count trades above/within/below EM
-    - **Probability Weighted Analysis**: Better understanding of trade success likelihood
-    
-    #### 🔄 **Buy/Sell Analysis**
-    - **EM Context**: See if buying/selling is focused on high/low probability strikes
-    - **Risk Assessment**: Combine trade direction with probability estimates
-    - **Smart Money Detection**: High confidence buys far from EM may be informed
-    
-    #### 🚨 **Alert System**
-    - **EM Violations**: Automatic alerts for strikes significantly outside expected range
-    - **Probability Scoring**: Weight alerts by success probability
-    - **Event Detection**: Large premiums + extreme EM positions = potential catalysts
-    
-    ### 🚀 **What's New in This Version:**
-    
-    ✅ **Expected Move Calculation** - Full Black-Scholes based EM analysis  
-    ✅ **Strike Position Analysis** - Above/Within/Below EM classification  
-    ✅ **Probability Estimates** - Success likelihood for each position  
-    ✅ **Three Viewing Modes** - Moneyness, EM, and Combined views  
-    ✅ **ETF EM Integration** - Complete EM analysis for SPY/QQQ/IWM  
-    ✅ **0DTE EM Focus** - Special handling for same-day expiration  
-    ✅ **Alert EM Scoring** - EM violations boost alert scores  
-    ✅ **CSV Export Enhancement** - EM data included in all exports  
-    ✅ **Extreme EM Detection** - Highlight most aggressive EM plays  
-    
-    **Ready to see Expected Move analysis in action? Select your analysis type and click 'Run Enhanced Scan'!**
-    
-    **🎯 Try the ETF Flow Scanner to see Expected Move analysis on SPY, QQQ, and IWM short-term options!**
+    **🎯 Try the Main Flow Analysis or ETF Flow Scanner to see the new unified table with complete option pricing data!**
     """)
