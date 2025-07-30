@@ -13,7 +13,7 @@ import math
 # --- CONFIGURATION ---
 class Config:
     UW_TOKEN = st.secrets.get("UW_TOKEN", "e6e8601a-0746-4cec-a07d-c3eabfc13926")
-    EXCLUDE_TICKERS = {'TSLA', 'MSTR', 'CRCL', 'COIN', 'META', 'NVDA'}
+    EXCLUDE_TICKERS = {'TSLA', 'MSTR', 'CRCL', 'COIN', 'META', 'NVDA', 'AMD'}
     ALLOWED_TICKERS = {'QQQ', 'SPY', 'IWM'}
     MIN_PREMIUM = 100000
     LIMIT = 500
