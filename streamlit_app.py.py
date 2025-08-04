@@ -1,10 +1,12 @@
 import streamlit as st
 import httpx
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from collections import defaultdict
 import pandas as pd
 import numpy as np
 from zoneinfo import ZoneInfo  # Python 3.9+
+import json
+import hashlib
 
 # --- CONFIGURATION ---
 class Config:
@@ -28,8 +30,190 @@ class Config:
     IV_SPIKE_THRESHOLD = 0.20  # 20% IV increase threshold
     MULTI_LEG_TIME_WINDOW = 300  # 5 minutes in seconds
     CORRELATION_THRESHOLD = 0.7  # Correlation threshold for cross-asset analysis
+    
+    # Position tracking thresholds
+    HIGH_CONFIDENCE_THRESHOLD = 0.7  # Minimum confidence for tracking
+    TRACK_MIN_PREMIUM = 200000  # Minimum premium to track positions
+    POSITION_MATCH_TIME_WINDOW = 300  # 5 minutes for position matching
 
 config = Config()
+
+# --- NEW POSITION TRACKING SYSTEM ---
+class PositionTracker:
+    """Track high confidence positions across multiple days"""
+    
+    def __init__(self):
+        self.positions_key = "tracked_positions"
+        self.daily_data_key = "daily_option_data"
+    
+    def create_position_id(self, trade):
+        """Create unique position ID for tracking"""
+        # Use ticker, strike, expiry, type to create unique ID
+        position_string = f"{trade['ticker']}_{trade['strike']:.0f}_{trade['type']}_{trade['expiry']}"
+        return hashlib.md5(position_string.encode()).hexdigest()[:12]
+    
+    def is_trackable_position(self, trade):
+        """Determine if position meets tracking criteria"""
+        confidence = trade.get('side_confidence', 0)
+        premium = trade.get('premium', 0)
+        enhanced_side = trade.get('enhanced_side', '')
+        
+        # Only track high confidence buys with significant premium
+        return (confidence >= config.HIGH_CONFIDENCE_THRESHOLD and 
+                premium >= config.TRACK_MIN_PREMIUM and
+                'BUY' in enhanced_side and
+                'High Confidence' in enhanced_side)
+    
+    def save_trackable_positions(self, trades):
+        """Save high confidence positions for tracking"""
+        if 'tracked_positions' not in st.session_state:
+            st.session_state.tracked_positions = {}
+        
+        today = datetime.now().strftime('%Y-%m-%d')
+        trackable_trades = []
+        
+        for trade in trades:
+            if self.is_trackable_position(trade):
+                position_id = self.create_position_id(trade)
+                
+                position_data = {
+                    'position_id': position_id,
+                    'ticker': trade['ticker'],
+                    'strike': trade['strike'],
+                    'type': trade['type'],
+                    'expiry': trade['expiry'],
+                    'dte': trade['dte'],
+                    'original_date': today,
+                    'original_premium': trade['premium'],
+                    'original_volume': trade['volume'],
+                    'original_oi': trade['open_interest'],
+                    'original_side': trade['enhanced_side'],
+                    'original_confidence': trade['side_confidence'],
+                    'original_scenarios': trade.get('scenarios', []),
+                    'original_price': trade.get('price', 0),
+                    'original_underlying': trade.get('underlying_price', 0),
+                    'tracking_status': 'Active',
+                    'follow_up_data': []
+                }
+                
+                st.session_state.tracked_positions[position_id] = position_data
+                trackable_trades.append(trade)
+        
+        return trackable_trades
+    
+    def check_position_updates(self, current_trades):
+        """Check if tracked positions appear in current day's flow"""
+        if 'tracked_positions' not in st.session_state:
+            return []
+        
+        updates = []
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        for position_id, position in st.session_state.tracked_positions.items():
+            if position['tracking_status'] != 'Active':
+                continue
+            
+            # Look for matching positions in current trades
+            matches = []
+            for trade in current_trades:
+                if (trade['ticker'] == position['ticker'] and
+                    abs(trade['strike'] - position['strike']) < 1 and
+                    trade['type'] == position['type'] and
+                    trade['expiry'] == position['expiry']):
+                    matches.append(trade)
+            
+            if matches:
+                # Found activity in tracked position
+                total_new_volume = sum(t['volume'] for t in matches)
+                total_new_premium = sum(t['premium'] for t in matches)
+                
+                # Analyze the new activity
+                buy_matches = [t for t in matches if 'BUY' in t.get('enhanced_side', '')]
+                sell_matches = [t for t in matches if 'SELL' in t.get('enhanced_side', '')]
+                
+                follow_up_data = {
+                    'date': today,
+                    'total_volume': total_new_volume,
+                    'total_premium': total_new_premium,
+                    'trade_count': len(matches),
+                    'buy_count': len(buy_matches),
+                    'sell_count': len(sell_matches),
+                    'dominant_side': 'BUY' if len(buy_matches) > len(sell_matches) else 'SELL' if len(sell_matches) > len(buy_matches) else 'MIXED',
+                    'avg_confidence': np.mean([t.get('side_confidence', 0) for t in matches]),
+                    'largest_trade_premium': max(t['premium'] for t in matches),
+                    'volume_vs_original': total_new_volume / position['original_volume'] if position['original_volume'] > 0 else 0
+                }
+                
+                # Add to position's follow-up data
+                position['follow_up_data'].append(follow_up_data)
+                
+                updates.append({
+                    'position': position,
+                    'current_activity': follow_up_data,
+                    'matches': matches
+                })
+        
+        return updates
+    
+    def analyze_position_transfers(self):
+        """Analyze which positions had follow-up activity"""
+        if 'tracked_positions' not in st.session_state:
+            return {'transferred': [], 'no_activity': [], 'summary': {}}
+        
+        transferred = []
+        no_activity = []
+        
+        for position_id, position in st.session_state.tracked_positions.items():
+            if position['follow_up_data']:
+                transferred.append(position)
+            else:
+                no_activity.append(position)
+        
+        # Calculate transfer statistics
+        total_tracked = len(st.session_state.tracked_positions)
+        transfer_rate = len(transferred) / total_tracked if total_tracked > 0 else 0
+        
+        # Analyze transfer patterns
+        buy_transfers = len([p for p in transferred if any(f['dominant_side'] == 'BUY' for f in p['follow_up_data'])])
+        sell_transfers = len([p for p in transferred if any(f['dominant_side'] == 'SELL' for f in p['follow_up_data'])])
+        
+        summary = {
+            'total_tracked': total_tracked,
+            'transferred': len(transferred),
+            'no_activity': len(no_activity),
+            'transfer_rate': transfer_rate,
+            'buy_transfers': buy_transfers,
+            'sell_transfers': sell_transfers,
+            'avg_days_tracked': np.mean([len(p['follow_up_data']) for p in transferred]) if transferred else 0
+        }
+        
+        return {
+            'transferred': transferred,
+            'no_activity': no_activity,
+            'summary': summary
+        }
+    
+    def cleanup_expired_positions(self):
+        """Remove positions that have expired"""
+        if 'tracked_positions' not in st.session_state:
+            return 0
+        
+        today = datetime.now().date()
+        expired_count = 0
+        
+        for position_id, position in list(st.session_state.tracked_positions.items()):
+            try:
+                expiry_date = datetime.strptime(position['expiry'], '%Y-%m-%d').date()
+                if expiry_date < today:
+                    position['tracking_status'] = 'Expired'
+                    expired_count += 1
+            except:
+                continue
+        
+        return expired_count
+
+# Initialize position tracker
+position_tracker = PositionTracker()
 
 # --- API SETUP ---
 headers = {
@@ -2007,6 +2191,261 @@ def display_enhanced_alerts(trades):
                 st.metric("Alert Score", alert.get('alert_score', 0))
             st.divider()
 
+# --- NEW POSITION TRACKING DISPLAY FUNCTIONS ---
+def display_position_tracking_dashboard():
+    """Display position tracking dashboard"""
+    st.markdown("### 📊 High Confidence Position Tracking Dashboard")
+    
+    # Cleanup expired positions first
+    expired_count = position_tracker.cleanup_expired_positions()
+    if expired_count > 0:
+        st.info(f"🗑️ Cleaned up {expired_count} expired positions")
+    
+    # Get transfer analysis
+    analysis = position_tracker.analyze_position_transfers()
+    summary = analysis['summary']
+    
+    if summary['total_tracked'] == 0:
+        st.info("📍 No positions are currently being tracked. Run a scan to start tracking high confidence plays!")
+        return
+    
+    # Summary metrics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Tracked Positions", summary['total_tracked'])
+    
+    with col2:
+        st.metric("Transferred", summary['transferred'], 
+                 delta=f"{summary['transfer_rate']:.1%} rate")
+    
+    with col3:
+        st.metric("Buy Transfers", summary['buy_transfers'])
+    
+    with col4:
+        st.metric("Sell Transfers", summary['sell_transfers'])
+    
+    # Detailed analysis tabs
+    tab1, tab2, tab3 = st.tabs(["🔄 Active Transfers", "📊 All Tracked Positions", "📈 Transfer Analytics"])
+    
+    with tab1:
+        st.markdown("#### 🔄 Positions with Follow-up Activity")
+        transferred_positions = analysis['transferred']
+        
+        if not transferred_positions:
+            st.info("No transferred positions found yet")
+        else:
+            for position in transferred_positions:
+                with st.expander(f"📍 {position['ticker']} ${position['strike']:.0f}{position['type']} - {position['expiry']}"):
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.markdown("**Original Trade:**")
+                        st.write(f"💰 Premium: ${position['original_premium']:,.0f}")
+                        st.write(f"📊 Volume: {position['original_volume']:,}")
+                        st.write(f"🎯 Side: {position['original_side']}")
+                        st.write(f"📅 Date: {position['original_date']}")
+                        st.write(f"⏱️ DTE: {position['dte']} days")
+                    
+                    with col2:
+                        st.markdown("**Follow-up Activity:**")
+                        for i, follow_up in enumerate(position['follow_up_data'], 1):
+                            st.write(f"**Day {i} ({follow_up['date']}):**")
+                            st.write(f"💰 Premium: ${follow_up['total_premium']:,.0f}")
+                            st.write(f"📊 Volume: {follow_up['total_volume']:,} ({follow_up['volume_vs_original']:.1f}x original)")
+                            st.write(f"🎯 Dominant Side: {follow_up['dominant_side']}")
+                            st.write(f"🔄 Trades: {follow_up['trade_count']} ({follow_up['buy_count']} buys, {follow_up['sell_count']} sells)")
+                            st.write(f"🎯 Avg Confidence: {follow_up['avg_confidence']:.1%}")
+                            st.write("---")
+    
+    with tab2:
+        st.markdown("#### 📊 All Tracked Positions")
+        
+        if 'tracked_positions' in st.session_state and st.session_state.tracked_positions:
+            positions_data = []
+            
+            for position_id, position in st.session_state.tracked_positions.items():
+                follow_up_count = len(position['follow_up_data'])
+                total_follow_up_volume = sum(f['total_volume'] for f in position['follow_up_data'])
+                total_follow_up_premium = sum(f['total_premium'] for f in position['follow_up_data'])
+                
+                # Determine status
+                if follow_up_count > 0:
+                    latest_activity = position['follow_up_data'][-1]
+                    status = f"✅ {follow_up_count} days activity"
+                    dominant_side = latest_activity['dominant_side']
+                else:
+                    status = "⏳ No follow-up"
+                    dominant_side = "N/A"
+                
+                positions_data.append({
+                    'Ticker': position['ticker'],
+                    'Strike': f"${position['strike']:.0f}",
+                    'Type': position['type'],
+                    'Expiry': position['expiry'],
+                    'DTE': position['dte'],
+                    'Original Date': position['original_date'],
+                    'Original Premium': f"${position['original_premium']:,.0f}",
+                    'Original Volume': f"{position['original_volume']:,}",
+                    'Status': status,
+                    'Follow-up Days': follow_up_count,
+                    'Total Follow Volume': f"{total_follow_up_volume:,}",
+                    'Total Follow Premium': f"${total_follow_up_premium:,.0f}",
+                    'Latest Side': dominant_side,
+                    'Position ID': position_id[:8]
+                })
+            
+            df = pd.DataFrame(positions_data)
+            st.dataframe(df, use_container_width=True)
+            
+            # Bulk actions
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                if st.button("🗑️ Clear Expired Positions"):
+                    expired_count = position_tracker.cleanup_expired_positions()
+                    st.success(f"Cleaned up {expired_count} expired positions")
+                    st.rerun()
+            
+            with col2:
+                if st.button("📥 Export Tracking Data"):
+                    csv = df.to_csv(index=False)
+                    st.download_button(
+                        label="Download CSV",
+                        data=csv,
+                        file_name=f"position_tracking_{datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv"
+                    )
+            
+            with col3:
+                if st.button("🔄 Refresh Analysis"):
+                    st.rerun()
+        
+        else:
+            st.info("No positions being tracked yet")
+    
+    with tab3:
+        st.markdown("#### 📈 Transfer Analytics")
+        
+        if summary['total_tracked'] > 0:
+            # Transfer rate analysis
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**📊 Transfer Statistics:**")
+                st.write(f"• **Overall Transfer Rate**: {summary['transfer_rate']:.1%}")
+                st.write(f"• **Buy-side Transfers**: {summary['buy_transfers']} positions")
+                st.write(f"• **Sell-side Transfers**: {summary['sell_transfers']} positions")
+                st.write(f"• **Average Tracking Days**: {summary['avg_days_tracked']:.1f}")
+            
+            with col2:
+                st.markdown("**🎯 Key Insights:**")
+                if summary['transfer_rate'] > 0.5:
+                    st.write("• 🟢 High transfer rate - good follow-through")
+                elif summary['transfer_rate'] > 0.3:
+                    st.write("• 🟡 Moderate transfer rate")
+                else:
+                    st.write("• 🔴 Low transfer rate - positions not following through")
+                
+                if summary['buy_transfers'] > summary['sell_transfers']:
+                    st.write("• 📈 More continued buying than selling")
+                elif summary['sell_transfers'] > summary['buy_transfers']:
+                    st.write("• 📉 More selling than continued buying")
+                else:
+                    st.write("• ⚖️ Balanced buy/sell follow-through")
+            
+            # Detailed breakdown by ticker
+            if 'tracked_positions' in st.session_state:
+                ticker_analysis = defaultdict(lambda: {'total': 0, 'transferred': 0})
+                
+                for position in st.session_state.tracked_positions.values():
+                    ticker = position['ticker']
+                    ticker_analysis[ticker]['total'] += 1
+                    if position['follow_up_data']:
+                        ticker_analysis[ticker]['transferred'] += 1
+                
+                st.markdown("**📊 Transfer Rates by Ticker:**")
+                ticker_data = []
+                for ticker, data in ticker_analysis.items():
+                    transfer_rate = data['transferred'] / data['total'] if data['total'] > 0 else 0
+                    ticker_data.append({
+                        'Ticker': ticker,
+                        'Total Tracked': data['total'],
+                        'Transferred': data['transferred'],
+                        'Transfer Rate': f"{transfer_rate:.1%}"
+                    })
+                
+                ticker_df = pd.DataFrame(ticker_data).sort_values('Transfer Rate', ascending=False)
+                st.dataframe(ticker_df, use_container_width=True)
+
+def display_enhanced_scan_with_tracking(trades):
+    """Enhanced scan results with position tracking integration"""
+    
+    # Save trackable positions from current scan
+    trackable_trades = position_tracker.save_trackable_positions(trades)
+    
+    if trackable_trades:
+        st.success(f"📍 Added {len(trackable_trades)} high confidence positions to tracking system")
+        
+        # Show what's being tracked
+        with st.expander("📍 Newly Tracked Positions", expanded=False):
+            tracking_data = []
+            for trade in trackable_trades:
+                tracking_data.append({
+                    'Ticker': trade['ticker'],
+                    'Strike': f"${trade['strike']:.0f}",
+                    'Type': trade['type'],
+                    'Expiry': trade['expiry'],
+                    'DTE': trade['dte'],
+                    'Premium': f"${trade['premium']:,.0f}",
+                    'Volume': f"{trade['volume']:,}",
+                    'Side': trade['enhanced_side'],
+                    'Confidence': f"{trade['side_confidence']:.1%}",
+                    'Primary Scenario': trade.get('scenarios', ['N/A'])[0]
+                })
+            
+            df = pd.DataFrame(tracking_data)
+            st.dataframe(df, use_container_width=True)
+    
+    # Check for updates to existing tracked positions
+    position_updates = position_tracker.check_position_updates(trades)
+    
+    if position_updates:
+        st.warning(f"🔄 Found activity in {len(position_updates)} previously tracked positions!")
+        
+        with st.expander("🔄 Position Updates", expanded=True):
+            for update in position_updates:
+                position = update['position']
+                activity = update['current_activity']
+                
+                st.markdown(f"**📍 {position['ticker']} ${position['strike']:.0f}{position['type']} - {position['expiry']}**")
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.write(f"**Original (Day 1):**")
+                    st.write(f"Premium: ${position['original_premium']:,.0f}")
+                    st.write(f"Volume: {position['original_volume']:,}")
+                    st.write(f"Side: {position['original_side']}")
+                
+                with col2:
+                    st.write(f"**Today's Activity:**")
+                    st.write(f"Premium: ${activity['total_premium']:,.0f}")
+                    st.write(f"Volume: {activity['total_volume']:,}")
+                    st.write(f"Side: {activity['dominant_side']}")
+                
+                with col3:
+                    volume_multiple = activity['volume_vs_original']
+                    st.write(f"**Analysis:**")
+                    st.write(f"Volume Multiple: {volume_multiple:.1f}x")
+                    st.write(f"Trades: {activity['trade_count']}")
+                    st.write(f"Avg Confidence: {activity['avg_confidence']:.1%}")
+                
+                if volume_multiple > 1.5:
+                    st.success("💪 Strong continued interest!")
+                elif activity['dominant_side'] != 'BUY':
+                    st.warning("⚠️ Shift from buying to selling")
+                
+                st.divider()
+
 # --- CSV EXPORT ---
 def save_to_csv(trades, filename_prefix):
     if not trades:
@@ -2041,9 +2480,9 @@ def save_to_csv(trades, filename_prefix):
     )
 
 # --- STREAMLIT UI ---
-st.set_page_config(page_title="Enhanced Options Flow Tracker", page_icon="📊", layout="wide")
-st.title("📊 Enhanced Options Flow Tracker")
-st.markdown("### Real-time unusual options activity with Enhanced Buy/Sell Detection and Advanced Pattern Recognition")
+st.set_page_config(page_title="Enhanced Options Flow Tracker with Position Tracking", page_icon="📊", layout="wide")
+st.title("📊 Enhanced Options Flow Tracker with Position Tracking")
+st.markdown("### Real-time unusual options activity with Enhanced Buy/Sell Detection and Position Transfer Tracking")
 
 with st.sidebar:
     st.markdown("## 🎛️ Control Panel")
@@ -2051,6 +2490,7 @@ with st.sidebar:
         "Select Analysis Type:",
         [
             "🔍 Main Flow Analysis",
+            "📍 Position Tracking Dashboard",  # NEW
             "📈 Open Interest Deep Dive", 
             "🔄 Enhanced Buy/Sell Analysis",
             "🚨 Enhanced Alert System",
@@ -2058,6 +2498,15 @@ with st.sidebar:
             "🎯 Pattern Recognition"
         ]
     )
+    
+    # Show tracking status
+    if 'tracked_positions' in st.session_state:
+        tracked_count = len(st.session_state.tracked_positions)
+        active_count = len([p for p in st.session_state.tracked_positions.values() 
+                          if p['tracking_status'] == 'Active'])
+        st.markdown("### 📍 Tracking Status")
+        st.metric("Active Positions", active_count)
+        st.metric("Total Tracked", tracked_count)
     
     # Premium Range Filter
     st.markdown("### 💰 Premium Range Filter")
@@ -2134,7 +2583,11 @@ with st.sidebar:
     
     run_scan = st.button("🔄 Run Enhanced Scan", type="primary", use_container_width=True)
 
-if run_scan:
+# Main execution logic
+if scan_type == "📍 Position Tracking Dashboard":
+    display_position_tracking_dashboard()
+
+elif run_scan:
     with st.spinner(f"Running {scan_type}..."):
         if "ETF Flow Scanner" in scan_type:
             # ETF scanner uses its own data fetch
@@ -2156,6 +2609,8 @@ if run_scan:
             if not trades:
                 st.warning("⚠️ No ETF trades match your current filters. Try adjusting the filters.")
             else:
+                # Enhanced scan with tracking integration
+                display_enhanced_scan_with_tracking(trades)
                 display_etf_scanner(trades)
                 with st.expander("💾 Export Data", expanded=False):
                     save_to_csv(trades, "enhanced_etf_flow_scanner")
@@ -2180,6 +2635,9 @@ if run_scan:
             if not trades:
                 st.warning("⚠️ No trades match your current filters. Try adjusting the filters.")
             else:
+                # Enhanced scan with tracking integration
+                display_enhanced_scan_with_tracking(trades)
+                
                 # Display enhanced summary for all scan types
                 display_enhanced_summary(trades)
                 
@@ -2212,50 +2670,94 @@ if run_scan:
 
 else:
     st.markdown("""
-    ## Welcome to the Enhanced Options Flow Tracker! 👋
+    ## Welcome to the Enhanced Options Flow Tracker with Position Tracking! 👋
     
-    ### 🆕 Major Updates in This Version:
+    ### 🆕 **NEW: Position Transfer Tracking System**
     
-    #### 🔄 **Revolutionary Buy/Sell Detection System**
-    - **Multi-Method Analysis**: Combines 6+ detection methods for maximum accuracy
-    - **Confidence Scoring**: Every trade gets a confidence score (0-100%)
-    - **Enhanced Reasoning**: See exactly why each trade was classified as buy/sell
-    - **Fallback Systems**: Multiple backup methods when primary data is missing
-    - **Real-time Debugging**: Built-in diagnostics to troubleshoot detection issues
+    #### 📍 **What Gets Tracked:**
+    - **High confidence BUY positions** (70%+ confidence)
+    - **Significant premium** ($200K+ threshold)
+    - **All option types** and expirations
+    - **Automatic position ID** generation for precise tracking
     
-    #### 🎯 **Advanced Detection Methods:**
+    #### 🔄 **How Transfer Detection Works:**
+    1. **Scan Detection**: High confidence plays automatically saved to tracking system
+    2. **Daily Monitoring**: Each new scan checks for activity in tracked positions  
+    3. **Transfer Analysis**: Identifies continued buying, selling, or mixed activity
+    4. **Pattern Recognition**: Analyzes volume multiples and sentiment shifts
+    
+    #### 📊 **Position Tracking Dashboard Features:**
+    - **Transfer Rate Metrics**: See what % of positions have follow-up activity
+    - **Buy vs Sell Analysis**: Track if positions continue buying or shift to selling
+    - **Volume Analysis**: Compare follow-up volume to original activity
+    - **Ticker-level Insights**: Which stocks/ETFs have best follow-through rates
+    
+    #### 🎯 **Key Tracking Insights:**
+    - **✅ Transferred Positions**: Had follow-up activity (continued interest)
+    - **⏳ No Follow-up**: High confidence plays that didn't transfer
+    - **📈 Volume Multiples**: How much additional volume came in
+    - **🔄 Sentiment Shifts**: Did buying continue or shift to selling?
+    
+    #### 💡 **Use Cases:**
+    1. **Validate Edge**: See if your high confidence detection actually predicts follow-up flow
+    2. **Pattern Learning**: Identify which types of plays have best transfer rates  
+    3. **Risk Management**: Monitor if large positions attract continued buying or selling
+    4. **Market Sentiment**: Track if institutional-sized plays influence follow-up activity
+    
+    #### 🔧 **Getting Started:**
+    1. **Run any scan** to automatically start tracking high confidence positions
+    2. **Check "Position Tracking Dashboard"** to see current tracking status
+    3. **Run daily scans** to detect transfer activity
+    4. **Analyze patterns** in the Transfer Analytics tab
+    
+    ### 🚀 **Enhanced Features:**
+    - **Automatic cleanup** of expired positions
+    - **CSV export** of tracking data
+    - **Real-time alerts** when tracked positions show activity
+    - **Confidence scoring** for transfer predictions
+    - **Bulk position management** tools
+    
+    ### 🔍 **Enhanced Buy/Sell Detection System:**
+    
+    #### 🎯 **Multi-Method Analysis** (6+ detection methods):
     1. **Bid/Ask Price Analysis** - Most reliable when available
     2. **Volume/OI Ratio Analysis** - Identifies new position building
-    3. **Description Keyword Analysis** - Parses trade descriptions for buying/selling indicators
-    4. **Rule Pattern Analysis** - Uses ascending/descending fill patterns
-    5. **Option Moneyness Analysis** - OTM calls typically bought, etc.
-    6. **Time-based Analysis** - Market open patterns, EOD positioning
+    3. **Description Keyword Analysis** - Parses trade descriptions
+    4. **Rule Pattern Analysis** - Uses ascending/descending patterns
+    5. **Option Moneyness Analysis** - OTM calls typically bought
+    6. **Time-based Analysis** - Market timing patterns
     
-    #### 📊 **Enhanced Trade Information:**
-    - **Side Display**: 🟢 BUY / 🔴 SELL / ⚪ UNKNOWN with confidence levels
-    - **Confidence Indicators**: 🟢 High (70%+) / 🟡 Medium (40-69%) / 🔴 Low (<40%)
-    - **Detailed Reasoning**: See the logic behind each classification
-    - **Quality Metrics**: Track data completeness and detection success rates
+    #### 📊 **Confidence Scoring:**
+    - **🟢 High Confidence (70%+)**: Multiple signals align
+    - **🟡 Medium Confidence (40-69%)**: Good signals with some uncertainty
+    - **🔴 Low Confidence (<40%)**: Limited or conflicting data
     
     #### 🔧 **Built-in Diagnostics:**
-    - **Data Quality Check**: Automatically analyze bid/ask availability, price data quality
-    - **Debug Mode**: Step-by-step analysis of individual trades
-    - **Low Confidence Analysis**: Identify and troubleshoot problem trades
-    - **API Health Monitoring**: Track response quality and completeness
+    - **Data Quality Check**: Analyze bid/ask availability
+    - **Debug Mode**: Step-by-step trade analysis
+    - **Low Confidence Analysis**: Identify problem trades
+    - **API Health Monitoring**: Track response quality
     
-    ### 📋 **Enhanced Analysis Types:**
+    ### 📋 **Analysis Types:**
     
     #### 🔍 **Main Flow Analysis**
     - All trades with enhanced buy/sell detection
     - Confidence scoring and reasoning for each trade
+    - **NEW**: Automatic position tracking integration
     - Short-term ETF focus section included
     
-    #### 🔄 **Enhanced Buy/Sell Analysis** ⭐ NEW!
+    #### 📍 **Position Tracking Dashboard** ⭐ NEW!
+    - **Transfer Rate Metrics**: What % of positions had follow-up activity
+    - **Active Transfers**: Positions with continued flow
+    - **Volume Analysis**: Compare follow-up to original activity  
+    - **Transfer Analytics**: Learn which patterns work best
+    - **Ticker Breakdown**: Which stocks have best follow-through
+    
+    #### 🔄 **Enhanced Buy/Sell Analysis**
     - **Detailed confidence distribution** analysis
     - **Side-by-side buy vs sell** comparison with premiums
     - **Debug mode** for troubleshooting detection issues
     - **Low confidence trade analysis** to improve data quality
-    - **Key insights** about market sentiment and data quality
     
     #### 🚨 **Enhanced Alert System**
     - Incorporates buy/sell confidence into alert scoring
@@ -2263,50 +2765,79 @@ else:
     - Enhanced reasoning includes confidence metrics
     
     #### ⚡ **ETF Flow Scanner**
-    - All ETF trades now show enhanced buy/sell detection
+    - **NEW**: Enhanced tracking for SPY/QQQ/IWM ≤ 7 DTE
+    - All ETF trades show enhanced buy/sell detection
     - Confidence metrics for short-term plays
     - Buy/sell ratios for each ETF
     
     #### 🎯 **Pattern Recognition**
-    - Multi-leg strategies now use enhanced trade sides
-    - Gamma squeeze detection considers buy/sell confidence
+    - Multi-leg strategies with enhanced trade sides
+    - Gamma squeeze detection with buy/sell confidence
     - Cross-asset correlation with directional analysis
     
-    ### 🛠️ **Troubleshooting Features:**
+    ### 🛠️ **How Position Tracking Works:**
     
-    #### 🔧 **Debug Mode** (Enable in sidebar)
-    - **Data Quality Diagnostics**: Check completeness of price, bid/ask, volume data
-    - **Sample Trade Analysis**: Step-by-step breakdown of detection logic
-    - **Field Availability Check**: See what data fields are actually available
-    - **API Response Inspection**: Raw data examination for troubleshooting
+    #### 📊 **Automatic Tracking Criteria:**
+    - **High confidence BUY trades** (70%+ confidence)
+    - **Minimum $200K premium** threshold
+    - **Unique position ID** for precise matching
+    - **Smart expiry management** (auto-cleanup expired)
     
-    #### ⚠️ **Automatic Issue Detection**
-    - **Missing Bid/Ask Data**: Identifies when price discovery is limited
-    - **Low Confidence Trades**: Highlights trades needing better data
-    - **Data Format Issues**: Detects and handles inconsistent data types
-    - **Rate Limiting**: Handles API limitations gracefully
+    #### 🔄 **Transfer Detection Logic:**
+    1. **Position Matching**: Exact ticker/strike/expiry/type match
+    2. **Activity Analysis**: New volume, premium, trade count
+    3. **Sentiment Analysis**: Continued buying vs selling
+    4. **Volume Comparison**: Multiples of original activity
+    5. **Confidence Tracking**: Quality of follow-up signals
     
-    ### 🎛️ **Enhanced Filters:**
-    - **High Confidence Only**: Show only trades with 70%+ confidence
-    - **Medium+ Confidence**: Trades with 40%+ confidence
-    - **Buy/Sell Specific**: Filter by trade direction
-    - **Debug Diagnostics**: Toggle detailed analysis on/off
+    #### 📈 **Key Metrics:**
+    - **Transfer Rate**: % of tracked positions with follow-up
+    - **Volume Multiples**: How much additional flow
+    - **Sentiment Persistence**: Buying continues vs shifts to selling
+    - **Confidence Quality**: Are follow-up trades also high confidence?
     
-    ### 💡 **Pro Tips for Best Results:**
+    ### 💡 **Pro Tips:**
     
-    1. **Enable Debug Mode** if you're seeing too many "UNKNOWN" trades
-    2. **Use "High Confidence Only"** filter for the most reliable directional data
-    3. **Check the diagnostics** to see data quality metrics
-    4. **Look for 🟢 High Confidence** indicators in the trade tables
-    5. **Review low confidence trades** to understand data limitations
+    #### 🎯 **For Best Results:**
+    1. **Run daily scans** to build tracking history
+    2. **Focus on "High Confidence Only"** filter for tracking
+    3. **Check Position Dashboard** to see what transfers
+    4. **Look for volume multiples >1.5x** for strong signals
+    5. **Monitor sentiment shifts** (buy → sell pressure)
     
-    ### 🚀 **What's Fixed:**
-    - **Better field name detection** - handles different API response formats
-    - **Improved error handling** - graceful degradation when data is missing
-    - **Enhanced Volume/OI analysis** - more sophisticated thresholds
-    - **Contextual rule interpretation** - better understanding of trade patterns
-    - **Multiple fallback methods** - never gives up on classification
+    #### 🔍 **Troubleshooting:**
+    1. **Enable Debug Mode** if seeing too many "UNKNOWN" trades
+    2. **Check diagnostics** to see data quality metrics
+    3. **Review low confidence trades** to understand limitations
+    4. **Use Medium+ Confidence filter** for broader coverage
     
-    **Ready to see the enhanced buy/sell detection in action? Select your analysis type and click 'Run Enhanced Scan'!**
+    ### 🚀 **What This Solves:**
+    
+    #### ❓ **Key Questions Answered:**
+    - **Do high confidence plays actually predict follow-up flow?**
+    - **Which types of options have best transfer rates?**
+    - **Do large institutional trades attract more activity?** 
+    - **How quickly do positions transfer (same day vs next day)?**
+    - **When do buying patterns shift to selling pressure?**
+    
+    #### 📊 **Edge Building:**
+    - **Validate detection quality** with real follow-up data
+    - **Learn which patterns work** vs just noise
+    - **Time entry/exit** based on transfer patterns
+    - **Risk management** when positions don't transfer
+    - **Market sentiment** from institutional flow persistence
+    
+    **Ready to track high confidence plays and see what transfers? Select your analysis type and click 'Run Enhanced Scan'!**
+    
+    ---
+    
+    ### 🔧 **Quick Start Guide:**
+    
+    1. **First Time**: Run "Main Flow Analysis" to start tracking positions
+    2. **Daily**: Check "Position Tracking Dashboard" for transfers  
+    3. **Deep Dive**: Use "Enhanced Buy/Sell Analysis" for signal quality
+    4. **Alerts**: Monitor "Enhanced Alert System" for high-priority plays
+    5. **Export**: Save data for offline analysis and backtesting
+    
+    **The system learns and improves as you use it. Start tracking today!**
     """)
-
