@@ -11,7 +11,7 @@ import hashlib
 # --- CONFIGURATION ---
 class Config:
     UW_TOKEN = st.secrets.get("UW_TOKEN", "e6e8601a-0746-4cec-a07d-c3eabfc13926")
-    EXCLUDE_TICKERS = {'MSTR', 'CRCL', 'COIN', 'META', 'NVDA','AMD', 'TSLA','CRWV'}
+    EXCLUDE_TICKERS = {'MSTR', 'CRCL', 'COIN', 'META', 'NVDA','AMD', 'TSLA','CRWV','PLTR'}
     ALLOWED_TICKERS = {'QQQ', 'SPY', 'IWM'}
     MIN_PREMIUM = 100000
     LIMIT = 500
@@ -2841,4 +2841,5 @@ else:
     
     **The system learns and improves as you use it. Start tracking today!**
     """)
+
 
