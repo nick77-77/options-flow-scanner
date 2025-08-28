@@ -7,10 +7,8 @@ import numpy as np
 from zoneinfo import ZoneInfo  # Python 3.9+
 import json
 import hashlib
-import time
-import requests
 
-# --- ENHANCED CONFIGURATION ---
+# --- CONFIGURATION ---
 class Config:
     UW_TOKEN = st.secrets.get("UW_TOKEN", "e6e8601a-0746-4cec-a07d-c3eabfc13926")
     EXCLUDE_TICKERS = {'MSTR', 'CRCL', 'COIN', 'META', 'NVDA','AMD', 'TSLA','CRWV','PLTR'}
@@ -27,7 +25,7 @@ class Config:
     HIGH_VOL_OI_RATIO = 5.0  # High volume to OI ratio threshold
     UNUSUAL_OI_THRESHOLD = 1000  # Unusual open interest threshold
     
-    # Pattern recognition thresholds
+    # New pattern recognition thresholds
     GAMMA_SQUEEZE_THRESHOLD = 0.10  # 10% price movement threshold
     IV_SPIKE_THRESHOLD = 0.20  # 20% IV increase threshold
     MULTI_LEG_TIME_WINDOW = 300  # 5 minutes in seconds
@@ -37,493 +35,12 @@ class Config:
     HIGH_CONFIDENCE_THRESHOLD = 0.7  # Minimum confidence for tracking
     TRACK_MIN_PREMIUM = 200000  # Minimum premium to track positions
     POSITION_MATCH_TIME_WINDOW = 300  # 5 minutes for position matching
-    
-    # NEW: Enhanced alert and performance settings
-    ENABLE_PERFORMANCE_TRACKING = True
-    ENABLE_SMART_ALERTS = True
-    ALERT_SCORE_THRESHOLD = 8.0
-    CRITICAL_ALERT_THRESHOLD = 10.0
-    
-    # NEW: Backtesting and validation
-    BACKTEST_DAYS = 30
-    MIN_TRANSFER_VOLUME_MULTIPLE = 1.5
-    
-    # NEW: Dark pool detection
-    DARK_POOL_MIN_PREMIUM = 500000
-    DARK_POOL_MIN_TRADES = 3
-    DARK_POOL_TIME_WINDOW = 5  # minutes
-    
-    # NEW: Performance tracking
-    PERFORMANCE_UPDATE_INTERVAL = 300  # 5 minutes
-    MAX_PERFORMANCE_HISTORY = 100
-    
-    # NEW: Market context integration
-    MARKET_CONTEXT_REFRESH = 600  # 10 minutes
-    
-    # Webhooks and notifications
-    DISCORD_WEBHOOK = st.secrets.get("DISCORD_WEBHOOK", "")
-    ENABLE_NOTIFICATIONS = st.secrets.get("ENABLE_NOTIFICATIONS", False)
 
 config = Config()
 
-# --- NEW: PERFORMANCE TRACKING SYSTEM ---
-class PerformanceTracker:
-    """Track P&L and success rates for positions and predictions"""
-    
-    def __init__(self):
-        self.performance_key = "performance_data"
-        self.metrics_key = "performance_metrics"
-    
-    def initialize_performance_tracking(self):
-        """Initialize performance tracking in session state"""
-        if 'performance_data' not in st.session_state:
-            st.session_state.performance_data = {
-                'daily_pnl': [],
-                'win_rate': 0,
-                'total_trades_tracked': 0,
-                'successful_predictions': 0,
-                'avg_hold_time': 0,
-                'best_scenarios': [],
-                'worst_scenarios': []
-            }
-    
-    def calculate_theoretical_pnl(self, position, days_held=1):
-        """Calculate theoretical P&L based on typical option movements"""
-        try:
-            original_premium = position.get('original_premium', 0)
-            dte_original = position.get('dte', 30)
-            option_type = position.get('type', 'C')
-            
-            # Simplified P&L calculation (in real implementation, you'd fetch current prices)
-            # This is a mock calculation for demonstration
-            theta_decay = (days_held * 0.02) if dte_original <= 7 else (days_held * 0.01)
-            
-            if len(position.get('follow_up_data', [])) > 0:
-                # Position had follow-up activity - likely positive
-                momentum_gain = 0.15 if 'BUY' in position.get('original_side', '') else -0.10
-                estimated_pnl = original_premium * (momentum_gain - theta_decay)
-            else:
-                # No follow-up - likely theta decay
-                estimated_pnl = original_premium * (-theta_decay * 2)
-            
-            return estimated_pnl
-            
-        except Exception as e:
-            return 0
-    
-    def update_performance_metrics(self):
-        """Update overall performance metrics"""
-        if 'tracked_positions' not in st.session_state:
-            return
-        
-        self.initialize_performance_tracking()
-        positions = st.session_state.tracked_positions
-        
-        total_positions = len(positions)
-        transferred_positions = [p for p in positions.values() if p.get('follow_up_data')]
-        
-        if total_positions > 0:
-            # Calculate metrics
-            transfer_rate = len(transferred_positions) / total_positions
-            
-            # Theoretical P&L calculation
-            total_pnl = 0
-            profitable_trades = 0
-            
-            for position in positions.values():
-                days_since = (datetime.now() - datetime.strptime(position['original_date'], '%Y-%m-%d')).days
-                pnl = self.calculate_theoretical_pnl(position, days_since)
-                total_pnl += pnl
-                
-                if pnl > 0:
-                    profitable_trades += 1
-            
-            # Update session state
-            st.session_state.performance_data.update({
-                'total_trades_tracked': total_positions,
-                'successful_predictions': len(transferred_positions),
-                'win_rate': profitable_trades / total_positions if total_positions > 0 else 0,
-                'transfer_rate': transfer_rate,
-                'total_theoretical_pnl': total_pnl,
-                'avg_pnl_per_trade': total_pnl / total_positions if total_positions > 0 else 0
-            })
-    
-    def get_performance_summary(self):
-        """Get current performance summary"""
-        self.update_performance_metrics()
-        return st.session_state.get('performance_data', {})
-
-# --- NEW: ENHANCED ALERT SYSTEM ---
-class SmartAlertManager:
-    """Enhanced alert system with ML-like scoring and notifications"""
-    
-    def __init__(self):
-        self.alert_history_key = "alert_history"
-        self.notification_queue_key = "notification_queue"
-    
-    def calculate_enhanced_alert_score(self, trade, historical_context=None):
-        """Calculate enhanced alert score with historical context"""
-        base_score = trade.get('alert_score', 0)
-        
-        # Historical success rate bonus
-        momentum_score = 0
-        if historical_context:
-            ticker = trade.get('ticker', '')
-            similar_trades = [t for t in historical_context 
-                            if t.get('ticker') == ticker 
-                            and abs(t.get('strike', 0) - trade.get('strike', 0)) < trade.get('strike', 0) * 0.1]
-            
-            if similar_trades:
-                success_rate = sum(1 for t in similar_trades if t.get('transferred', False)) / len(similar_trades)
-                momentum_score = success_rate * 3  # Up to 3 bonus points
-        
-        # Volume surge scoring
-        vol_oi = trade.get('vol_oi_ratio', 0)
-        volume_score = min(vol_oi / 5, 4)  # Up to 4 points, capped
-        
-        # Confidence bonus
-        confidence = trade.get('side_confidence', 0)
-        confidence_score = confidence * 2  # Up to 2 points
-        
-        # Time urgency (shorter DTE = higher urgency)
-        dte = trade.get('dte', 30)
-        urgency_score = max(0, (21 - dte) / 7) if dte <= 21 else 0  # Up to 3 points
-        
-        # Dark pool activity bonus
-        dark_pool_score = 2 if trade.get('premium', 0) > 1000000 and vol_oi > 10 else 0
-        
-        # IV spike bonus
-        iv_score = 1 if trade.get('iv', 0) > config.EXTREME_IV_THRESHOLD else 0
-        
-        enhanced_score = (base_score + momentum_score + volume_score + 
-                         confidence_score + urgency_score + dark_pool_score + iv_score)
-        
-        # Store scoring breakdown for transparency
-        trade['score_breakdown'] = {
-            'base': base_score,
-            'momentum': momentum_score,
-            'volume': volume_score,
-            'confidence': confidence_score,
-            'urgency': urgency_score,
-            'dark_pool': dark_pool_score,
-            'iv_spike': iv_score,
-            'total': enhanced_score
-        }
-        
-        return enhanced_score
-    
-    def generate_smart_alerts(self, trades):
-        """Generate smart alerts with enhanced scoring"""
-        alerts = []
-        
-        # Get historical context for momentum scoring
-        historical_context = self.get_historical_context()
-        
-        for trade in trades:
-            enhanced_score = self.calculate_enhanced_alert_score(trade, historical_context)
-            
-            if enhanced_score >= config.ALERT_SCORE_THRESHOLD:
-                trade['enhanced_alert_score'] = enhanced_score
-                trade['alert_priority'] = self.get_alert_priority(enhanced_score)
-                alerts.append(trade)
-        
-        # Sort by enhanced score
-        return sorted(alerts, key=lambda x: -x.get('enhanced_alert_score', 0))
-    
-    def get_alert_priority(self, score):
-        """Determine alert priority based on score"""
-        if score >= config.CRITICAL_ALERT_THRESHOLD:
-            return "🔴 CRITICAL"
-        elif score >= config.ALERT_SCORE_THRESHOLD + 2:
-            return "🟠 HIGH"
-        elif score >= config.ALERT_SCORE_THRESHOLD:
-            return "🟡 MEDIUM"
-        else:
-            return "🟢 LOW"
-    
-    def get_historical_context(self):
-        """Get historical context for scoring"""
-        # In a real implementation, this would query a database
-        # For now, return empty list
-        return st.session_state.get('historical_trades', [])
-    
-    def send_notification(self, alert):
-        """Send notification for critical alerts"""
-        if not config.ENABLE_NOTIFICATIONS or not config.DISCORD_WEBHOOK:
-            return
-        
-        if alert.get('enhanced_alert_score', 0) >= config.CRITICAL_ALERT_THRESHOLD:
-            message = self.format_discord_message(alert)
-            self.send_discord_webhook(message)
-    
-    def format_discord_message(self, alert):
-        """Format alert for Discord"""
-        enhanced_side = alert.get('enhanced_side', 'UNKNOWN')
-        confidence = alert.get('side_confidence', 0)
-        score_breakdown = alert.get('score_breakdown', {})
-        
-        return f"""
-🚨 **CRITICAL ALERT** 🚨
-
-**{alert['ticker']} {alert['strike']:.0f}{alert['type']} {alert['expiry']}**
-
-💰 **Premium:** ${alert['premium']:,.0f}
-🎯 **Side:** {enhanced_side} ({confidence:.0%} confidence)
-📊 **Vol/OI:** {alert.get('vol_oi_ratio', 0):.1f}
-⏱️ **DTE:** {alert.get('dte', 0)} days
-🔥 **Alert Score:** {alert.get('enhanced_alert_score', 0):.1f}
-
-**Score Breakdown:**
-• Base: {score_breakdown.get('base', 0):.1f}
-• Momentum: {score_breakdown.get('momentum', 0):.1f}  
-• Volume: {score_breakdown.get('volume', 0):.1f}
-• Confidence: {score_breakdown.get('confidence', 0):.1f}
-
-**Scenarios:** {', '.join(alert.get('scenarios', []))}
-        """
-    
-    def send_discord_webhook(self, message):
-        """Send Discord webhook"""
-        try:
-            payload = {"content": message}
-            response = requests.post(config.DISCORD_WEBHOOK, json=payload)
-            return response.status_code == 204
-        except Exception as e:
-            st.error(f"Failed to send notification: {e}")
-            return False
-
-# --- NEW: MARKET CONTEXT SYSTEM ---
-@st.cache_data(ttl=config.MARKET_CONTEXT_REFRESH)
-def get_market_context():
-    """Get broader market context for better analysis"""
-    try:
-        # Mock market context - in real implementation, integrate with financial APIs
-        current_hour = datetime.now().hour
-        
-        # Simulate market conditions based on time and other factors
-        context = {
-            'market_session': 'Pre-Market' if current_hour < 9 else 'Regular Hours' if current_hour < 16 else 'After Hours',
-            'volatility_regime': 'Low' if np.random.random() > 0.3 else 'High',
-            'market_sentiment': np.random.choice(['Bullish', 'Bearish', 'Neutral'], p=[0.4, 0.3, 0.3]),
-            'sector_rotation': np.random.choice(['Tech Leading', 'Financials Leading', 'Defensive', 'Mixed']),
-            'options_flow_sentiment': 'Call Heavy' if np.random.random() > 0.5 else 'Put Heavy',
-            'institutional_activity': 'High' if current_hour in [9, 10, 15] else 'Normal',
-            'gamma_environment': 'High Gamma' if np.random.random() > 0.7 else 'Normal Gamma',
-            'last_updated': datetime.now().isoformat()
-        }
-        
-        return context
-        
-    except Exception as e:
-        return {
-            'market_session': 'Unknown',
-            'volatility_regime': 'Unknown', 
-            'market_sentiment': 'Unknown',
-            'error': str(e),
-            'last_updated': datetime.now().isoformat()
-        }
-
-# --- NEW: ADVANCED PATTERN RECOGNITION ---
-def detect_dark_pool_activity(ticker_trades):
-    """Detect potential dark pool or institutional block activity"""
-    dark_pool_indicators = []
-    
-    # Group trades by time windows (5-minute windows)
-    time_groups = defaultdict(list)
-    
-    for trade in ticker_trades:
-        if trade.get('premium', 0) >= config.DARK_POOL_MIN_PREMIUM:
-            try:
-                time_str = trade.get('time_ny', '')
-                if time_str != 'N/A' and ':' in time_str:
-                    hour, minute = time_str.split(':')[:2]
-                    minute = str(int(minute) // 5 * 5).zfill(2)  # Round to 5-minute intervals
-                    time_key = f"{hour}:{minute}"
-                    time_groups[time_key].append(trade)
-            except:
-                continue
-    
-    for time_window, trades in time_groups.items():
-        if len(trades) >= config.DARK_POOL_MIN_TRADES:
-            total_premium = sum(t.get('premium', 0) for t in trades)
-            if total_premium >= config.DARK_POOL_MIN_PREMIUM * 3:  # At least 3x the minimum
-                
-                # Calculate metrics
-                avg_confidence = np.mean([t.get('side_confidence', 0) for t in trades])
-                dominant_side = 'BUY' if sum(1 for t in trades if 'BUY' in t.get('enhanced_side', '')) > len(trades)/2 else 'MIXED'
-                
-                dark_pool_indicators.append({
-                    'ticker': trades[0].get('ticker'),
-                    'time_window': time_window,
-                    'trade_count': len(trades),
-                    'total_premium': total_premium,
-                    'avg_confidence': avg_confidence,
-                    'dominant_side': dominant_side,
-                    'strikes': [t.get('strike') for t in trades],
-                    'pattern': 'Dark Pool Block Activity',
-                    'confidence': 'High' if len(trades) >= 5 and avg_confidence > 0.6 else 'Medium',
-                    'risk_level': 'High' if total_premium > 5000000 else 'Medium'
-                })
-    
-    return dark_pool_indicators
-
-def detect_earnings_plays(ticker_trades):
-    """Identify potential earnings or event-driven trades"""
-    earnings_indicators = []
-    
-    for trade in ticker_trades:
-        iv = trade.get('iv', 0)
-        dte = trade.get('dte', 0)
-        premium = trade.get('premium', 0)
-        enhanced_side = trade.get('enhanced_side', '')
-        
-        # Earnings play criteria: High IV + Short DTE + Large Premium + Buying
-        if (iv > 0.4 and  # 40%+ IV
-            dte <= 21 and  # 3 weeks or less  
-            premium > 200000 and  # $200K+
-            'BUY' in enhanced_side):
-            
-            # Additional scoring
-            earnings_score = 0
-            earnings_score += min(iv * 10, 5)  # IV contribution (max 5 points)
-            earnings_score += max(0, (21 - dte) / 7)  # DTE urgency (max 3 points)
-            earnings_score += min(premium / 1000000, 3)  # Premium size (max 3 points)
-            
-            earnings_indicators.append({
-                'ticker': trade['ticker'],
-                'strike': trade['strike'],
-                'type': trade['type'],
-                'expiry': trade['expiry'],
-                'iv': iv,
-                'dte': dte,
-                'premium': premium,
-                'enhanced_side': enhanced_side,
-                'earnings_score': earnings_score,
-                'pattern': 'Earnings/Event Play',
-                'confidence': 'High' if earnings_score > 8 else 'Medium' if earnings_score > 5 else 'Low',
-                'event_proximity': 'Very Close' if dte <= 7 else 'Close' if dte <= 14 else 'Moderate'
-            })
-    
-    return sorted(earnings_indicators, key=lambda x: -x['earnings_score'])
-
-def detect_institutional_flow_patterns(ticker_trades):
-    """Detect institutional flow patterns"""
-    institutional_patterns = []
-    
-    # Group by ticker
-    ticker_groups = defaultdict(list)
-    for trade in ticker_trades:
-        ticker_groups[trade.get('ticker', '')].append(trade)
-    
-    for ticker, trades in ticker_groups.items():
-        if len(trades) < 3:
-            continue
-        
-        # Look for coordinated activity patterns
-        total_premium = sum(t.get('premium', 0) for t in trades)
-        large_trades = [t for t in trades if t.get('premium', 0) > 500000]
-        
-        if len(large_trades) >= 2 and total_premium > 2000000:
-            # Analyze the pattern
-            call_trades = [t for t in large_trades if t.get('type') == 'C']
-            put_trades = [t for t in large_trades if t.get('type') == 'P']
-            
-            buy_trades = [t for t in large_trades if 'BUY' in t.get('enhanced_side', '')]
-            avg_confidence = np.mean([t.get('side_confidence', 0) for t in large_trades])
-            
-            # Determine pattern type
-            pattern_type = "Unknown"
-            if len(call_trades) > len(put_trades) * 2:
-                pattern_type = "Bullish Institutional Flow"
-            elif len(put_trades) > len(call_trades) * 2:
-                pattern_type = "Bearish Institutional Flow"
-            elif len(call_trades) > 0 and len(put_trades) > 0:
-                pattern_type = "Hedge/Collar Institutional Flow"
-            else:
-                pattern_type = "Mixed Institutional Flow"
-            
-            institutional_patterns.append({
-                'ticker': ticker,
-                'pattern_type': pattern_type,
-                'total_premium': total_premium,
-                'large_trade_count': len(large_trades),
-                'total_trade_count': len(trades),
-                'call_put_ratio': len(call_trades) / max(len(put_trades), 1),
-                'buy_ratio': len(buy_trades) / len(large_trades),
-                'avg_confidence': avg_confidence,
-                'confidence': 'High' if avg_confidence > 0.7 and len(large_trades) >= 3 else 'Medium'
-            })
-    
-    return sorted(institutional_patterns, key=lambda x: -x['total_premium'])
-
-# --- NEW: BACKTESTING ENGINE ---
-class BacktestEngine:
-    """Backtest the effectiveness of detection algorithms"""
-    
-    def __init__(self):
-        self.results_key = "backtest_results"
-    
-    def validate_prediction_accuracy(self):
-        """Validate how accurate our predictions have been"""
-        if 'tracked_positions' not in st.session_state:
-            return None
-        
-        positions = st.session_state.tracked_positions
-        if not positions:
-            return None
-        
-        # Group positions by confidence levels
-        high_conf = [p for p in positions.values() if p.get('original_confidence', 0) >= 0.8]
-        med_conf = [p for p in positions.values() if 0.5 <= p.get('original_confidence', 0) < 0.8]
-        low_conf = [p for p in positions.values() if p.get('original_confidence', 0) < 0.5]
-        
-        def calc_transfer_rate(position_list):
-            if not position_list:
-                return 0
-            transferred = sum(1 for p in position_list if len(p.get('follow_up_data', [])) > 0)
-            return transferred / len(position_list)
-        
-        # Calculate scenario effectiveness
-        scenario_performance = defaultdict(lambda: {'count': 0, 'transfers': 0})
-        for position in positions.values():
-            scenarios = position.get('original_scenarios', [])
-            has_transfer = len(position.get('follow_up_data', [])) > 0
-            
-            for scenario in scenarios:
-                scenario_performance[scenario]['count'] += 1
-                if has_transfer:
-                    scenario_performance[scenario]['transfers'] += 1
-        
-        # Convert to transfer rates
-        scenario_rates = {}
-        for scenario, data in scenario_performance.items():
-            if data['count'] >= 3:  # Only include scenarios with at least 3 occurrences
-                scenario_rates[scenario] = data['transfers'] / data['count']
-        
-        return {
-            'total_positions': len(positions),
-            'confidence_analysis': {
-                'high_confidence_rate': calc_transfer_rate(high_conf),
-                'medium_confidence_rate': calc_transfer_rate(med_conf),
-                'low_confidence_rate': calc_transfer_rate(low_conf),
-                'high_conf_count': len(high_conf),
-                'med_conf_count': len(med_conf),
-                'low_conf_count': len(low_conf)
-            },
-            'scenario_effectiveness': dict(sorted(scenario_rates.items(), key=lambda x: -x[1])),
-            'overall_transfer_rate': calc_transfer_rate(list(positions.values())),
-            'best_scenarios': [s for s, rate in scenario_rates.items() if rate > 0.6],
-            'worst_scenarios': [s for s, rate in scenario_rates.items() if rate < 0.3],
-        }
-
-# Initialize new systems
-performance_tracker = PerformanceTracker()
-alert_manager = SmartAlertManager()
-backtest_engine = BacktestEngine()
-
-# --- ENHANCED POSITION TRACKING SYSTEM (Updated) ---
+# --- NEW POSITION TRACKING SYSTEM ---
 class PositionTracker:
-    """Enhanced position tracking with performance metrics"""
+    """Track high confidence positions across multiple days"""
     
     def __init__(self):
         self.positions_key = "tracked_positions"
@@ -531,6 +48,7 @@ class PositionTracker:
     
     def create_position_id(self, trade):
         """Create unique position ID for tracking"""
+        # Use ticker, strike, expiry, type to create unique ID
         position_string = f"{trade['ticker']}_{trade['strike']:.0f}_{trade['type']}_{trade['expiry']}"
         return hashlib.md5(position_string.encode()).hexdigest()[:12]
     
@@ -540,30 +58,18 @@ class PositionTracker:
         premium = trade.get('premium', 0)
         enhanced_side = trade.get('enhanced_side', '')
         
-        # Enhanced criteria with market context
-        market_context = get_market_context()
-        
-        base_criteria = (confidence >= config.HIGH_CONFIDENCE_THRESHOLD and 
-                        premium >= config.TRACK_MIN_PREMIUM and
-                        'BUY' in enhanced_side and
-                        'High Confidence' in enhanced_side)
-        
-        # Bonus tracking for special conditions
-        special_conditions = (
-            premium > 1000000 or  # Always track mega trades
-            trade.get('vol_oi_ratio', 0) > 15 or  # Extreme volume
-            (market_context.get('institutional_activity') == 'High' and premium > 300000)
-        )
-        
-        return base_criteria or special_conditions
+        # Only track high confidence buys with significant premium
+        return (confidence >= config.HIGH_CONFIDENCE_THRESHOLD and 
+                premium >= config.TRACK_MIN_PREMIUM and
+                'BUY' in enhanced_side and
+                'High Confidence' in enhanced_side)
     
     def save_trackable_positions(self, trades):
-        """Enhanced position saving with market context"""
+        """Save high confidence positions for tracking"""
         if 'tracked_positions' not in st.session_state:
             st.session_state.tracked_positions = {}
         
         today = datetime.now().strftime('%Y-%m-%d')
-        market_context = get_market_context()
         trackable_trades = []
         
         for trade in trades:
@@ -587,12 +93,7 @@ class PositionTracker:
                     'original_price': trade.get('price', 0),
                     'original_underlying': trade.get('underlying_price', 0),
                     'tracking_status': 'Active',
-                    'follow_up_data': [],
-                    # NEW: Enhanced tracking data
-                    'market_context_at_entry': market_context,
-                    'alert_score': trade.get('enhanced_alert_score', 0),
-                    'expected_outcome': self.predict_outcome(trade),
-                    'tracking_reason': self.get_tracking_reason(trade)
+                    'follow_up_data': []
                 }
                 
                 st.session_state.tracked_positions[position_id] = position_data
@@ -600,46 +101,8 @@ class PositionTracker:
         
         return trackable_trades
     
-    def predict_outcome(self, trade):
-        """Predict likely outcome based on trade characteristics"""
-        confidence = trade.get('side_confidence', 0)
-        vol_oi = trade.get('vol_oi_ratio', 0)
-        premium = trade.get('premium', 0)
-        dte = trade.get('dte', 30)
-        
-        # Simple prediction model
-        prediction_score = 0
-        prediction_score += confidence * 40  # Up to 40 points
-        prediction_score += min(vol_oi / 2, 20)  # Up to 20 points
-        prediction_score += min(premium / 100000, 20)  # Up to 20 points
-        prediction_score += max(0, (30 - dte) / 2)  # Up to 15 points for short term
-        
-        if prediction_score > 70:
-            return "High Transfer Probability"
-        elif prediction_score > 50:
-            return "Medium Transfer Probability"
-        else:
-            return "Low Transfer Probability"
-    
-    def get_tracking_reason(self, trade):
-        """Get reason why this position is being tracked"""
-        reasons = []
-        
-        if trade.get('side_confidence', 0) >= 0.8:
-            reasons.append("Very High Confidence")
-        if trade.get('premium', 0) > 1000000:
-            reasons.append("Mega Premium")
-        if trade.get('vol_oi_ratio', 0) > 15:
-            reasons.append("Extreme Volume")
-        if 'Potential Insider Activity' in trade.get('scenarios', []):
-            reasons.append("Potential Insider Activity")
-        if not reasons:
-            reasons.append("High Confidence Buy")
-        
-        return ', '.join(reasons)
-    
     def check_position_updates(self, current_trades):
-        """Enhanced position update checking"""
+        """Check if tracked positions appear in current day's flow"""
         if 'tracked_positions' not in st.session_state:
             return []
         
@@ -660,18 +123,13 @@ class PositionTracker:
                     matches.append(trade)
             
             if matches:
-                # Enhanced follow-up analysis
+                # Found activity in tracked position
                 total_new_volume = sum(t['volume'] for t in matches)
                 total_new_premium = sum(t['premium'] for t in matches)
                 
+                # Analyze the new activity
                 buy_matches = [t for t in matches if 'BUY' in t.get('enhanced_side', '')]
                 sell_matches = [t for t in matches if 'SELL' in t.get('enhanced_side', '')]
-                
-                # Calculate momentum and sentiment shift
-                original_side = position.get('original_side', '')
-                current_sentiment = 'BUY' if len(buy_matches) > len(sell_matches) else 'SELL' if len(sell_matches) > len(buy_matches) else 'MIXED'
-                
-                sentiment_shift = self.analyze_sentiment_shift(original_side, current_sentiment)
                 
                 follow_up_data = {
                     'date': today,
@@ -680,129 +138,96 @@ class PositionTracker:
                     'trade_count': len(matches),
                     'buy_count': len(buy_matches),
                     'sell_count': len(sell_matches),
-                    'dominant_side': current_sentiment,
+                    'dominant_side': 'BUY' if len(buy_matches) > len(sell_matches) else 'SELL' if len(sell_matches) > len(buy_matches) else 'MIXED',
                     'avg_confidence': np.mean([t.get('side_confidence', 0) for t in matches]),
                     'largest_trade_premium': max(t['premium'] for t in matches),
-                    'volume_vs_original': total_new_volume / position['original_volume'] if position['original_volume'] > 0 else 0,
-                    'sentiment_shift': sentiment_shift,
-                    'momentum_score': self.calculate_momentum_score(position, matches)
+                    'volume_vs_original': total_new_volume / position['original_volume'] if position['original_volume'] > 0 else 0
                 }
                 
+                # Add to position's follow-up data
                 position['follow_up_data'].append(follow_up_data)
                 
                 updates.append({
                     'position': position,
                     'current_activity': follow_up_data,
-                    'matches': matches,
-                    'is_significant': follow_up_data['volume_vs_original'] > 1.5 or follow_up_data['total_premium'] > 500000
+                    'matches': matches
                 })
         
         return updates
     
-    def analyze_sentiment_shift(self, original_side, current_side):
-        """Analyze sentiment shift from original to current"""
-        if 'BUY' in original_side and current_side == 'BUY':
-            return "Continued Buying"
-        elif 'BUY' in original_side and current_side == 'SELL':
-            return "Shifted to Selling"
-        elif 'BUY' in original_side and current_side == 'MIXED':
-            return "Mixed Activity"
-        else:
-            return "Unclear"
+    def analyze_position_transfers(self):
+        """Analyze which positions had follow-up activity"""
+        if 'tracked_positions' not in st.session_state:
+            return {'transferred': [], 'no_activity': [], 'summary': {}}
+        
+        transferred = []
+        no_activity = []
+        
+        for position_id, position in st.session_state.tracked_positions.items():
+            if position['follow_up_data']:
+                transferred.append(position)
+            else:
+                no_activity.append(position)
+        
+        # Calculate transfer statistics
+        total_tracked = len(st.session_state.tracked_positions)
+        transfer_rate = len(transferred) / total_tracked if total_tracked > 0 else 0
+        
+        # Analyze transfer patterns
+        buy_transfers = len([p for p in transferred if any(f['dominant_side'] == 'BUY' for f in p['follow_up_data'])])
+        sell_transfers = len([p for p in transferred if any(f['dominant_side'] == 'SELL' for f in p['follow_up_data'])])
+        
+        summary = {
+            'total_tracked': total_tracked,
+            'transferred': len(transferred),
+            'no_activity': len(no_activity),
+            'transfer_rate': transfer_rate,
+            'buy_transfers': buy_transfers,
+            'sell_transfers': sell_transfers,
+            'avg_days_tracked': np.mean([len(p['follow_up_data']) for p in transferred]) if transferred else 0
+        }
+        
+        return {
+            'transferred': transferred,
+            'no_activity': no_activity,
+            'summary': summary
+        }
     
-    def calculate_momentum_score(self, position, matches):
-        """Calculate momentum score for follow-up activity"""
-        score = 0
-        
-        # Volume momentum
-        volume_multiple = sum(t['volume'] for t in matches) / max(position['original_volume'], 1)
-        score += min(volume_multiple * 10, 30)  # Up to 30 points
-        
-        # Premium momentum  
-        premium_multiple = sum(t['premium'] for t in matches) / max(position['original_premium'], 1)
-        score += min(premium_multiple * 20, 40)  # Up to 40 points
-        
-        # Confidence consistency
-        avg_confidence = np.mean([t.get('side_confidence', 0) for t in matches])
-        original_confidence = position.get('original_confidence', 0)
-        confidence_consistency = 1 - abs(avg_confidence - original_confidence)
-        score += confidence_consistency * 20  # Up to 20 points
-        
-        # Buy continuation bonus
-        buy_count = sum(1 for t in matches if 'BUY' in t.get('enhanced_side', ''))
-        if buy_count > len(matches) / 2:  # Majority are buys
-            score += 10
-        
-        return min(score, 100)  # Cap at 100
-
     def cleanup_expired_positions(self):
-        """Enhanced cleanup with performance tracking"""
+        """Remove positions that have expired"""
         if 'tracked_positions' not in st.session_state:
             return 0
         
         today = datetime.now().date()
         expired_count = 0
-        performance_data = []
         
         for position_id, position in list(st.session_state.tracked_positions.items()):
             try:
                 expiry_date = datetime.strptime(position['expiry'], '%Y-%m-%d').date()
                 if expiry_date < today:
                     position['tracking_status'] = 'Expired'
-                    
-                    # Calculate final performance metrics
-                    days_tracked = (today - datetime.strptime(position['original_date'], '%Y-%m-%d').date()).days
-                    had_transfer = len(position.get('follow_up_data', [])) > 0
-                    
-                    performance_data.append({
-                        'ticker': position['ticker'],
-                        'days_tracked': days_tracked,
-                        'had_transfer': had_transfer,
-                        'original_confidence': position.get('original_confidence', 0),
-                        'scenarios': position.get('original_scenarios', [])
-                    })
-                    
                     expired_count += 1
             except:
                 continue
         
-        # Update historical performance data
-        if performance_data:
-            if 'historical_performance' not in st.session_state:
-                st.session_state.historical_performance = []
-            st.session_state.historical_performance.extend(performance_data)
-        
         return expired_count
 
-# Initialize enhanced position tracker
+# Initialize position tracker
 position_tracker = PositionTracker()
 
-# --- KEEP ALL ORIGINAL FUNCTIONS (API, display, etc.) ---
-# [Previous API setup, parse_option_chain, determine_trade_side_enhanced, etc. remain the same]
-
+# --- API SETUP ---
 headers = {
     'Accept': 'application/json, text/plain',
     'Authorization': config.UW_TOKEN
 }
 url = 'https://api.unusualwhales.com/api/option-trades/flow-alerts'
 
-# [All your original helper functions remain unchanged - just adding them here for completeness]
-
-def parse_option_chain(opt_str):
-    try:
-        ticker = ''.join([c for c in opt_str if c.isalpha()])[:-1]
-        date_start = len(ticker)
-        date_str = opt_str[date_start:date_start+6]
-        expiry_date = date(2000 + int(date_str[:2]), int(date_str[2:4]), int(date_str[4:6]))
-        dte = (expiry_date - date.today()).days
-        option_type = opt_str[date_start+6].upper()
-        strike = int(opt_str[date_start+7:]) / 1000
-        return ticker, expiry_date.strftime('%Y-%m-%d'), dte, option_type, strike
-    except Exception:
-        return None, None, None, None, None
-
+# --- ENHANCED BUY/SELL DETECTION ---
 def determine_trade_side_enhanced(trade_data, debug=False):
-    """Enhanced trade side determination with debugging and confidence scoring"""
+    """
+    Enhanced trade side determination with debugging and confidence scoring
+    Returns: (side, confidence_score, reasoning)
+    """
     reasoning = []
     confidence_scores = []
     
@@ -1066,9 +491,60 @@ def determine_trade_side_enhanced(trade_data, debug=False):
     
     return final_side, final_confidence, reasoning
 
-# [Continue with all other original helper functions...]
+def diagnose_trade_data(trades):
+    """Diagnostic function to check data quality"""
+    st.markdown("## 🔍 Trade Data Diagnostics")
+    
+    if not trades:
+        st.error("No trades to diagnose!")
+        return
+    
+    # Sample size
+    st.write(f"**Total Trades**: {len(trades)}")
+    
+    # Data completeness
+    fields_to_check = ['price', 'bid', 'ask', 'volume', 'open_interest', 'description', 'rule_name']
+    completeness = {}
+    
+    for field in fields_to_check:
+        valid_count = sum(1 for t in trades if t.get(field) not in ['N/A', '', None, 0])
+        completeness[field] = valid_count / len(trades)
+    
+    st.write("**Data Completeness**:")
+    for field, pct in completeness.items():
+        color = "🟢" if pct > 0.8 else "🟡" if pct > 0.5 else "🔴"
+        st.write(f"{color} {field}: {pct:.1%}")
+    
+    # Sample trade inspection
+    st.write("**Sample Trade Data**:")
+    sample = trades[0]
+    important_fields = ['ticker', 'price', 'bid', 'ask', 'volume', 'open_interest', 'description', 'rule_name', 'side']
+    for key in important_fields:
+        if key in sample:
+            st.write(f"- {key}: {sample[key]} ({type(sample[key]).__name__})")
+    
+    # Quick buy/sell test on sample
+    st.write("**Sample Buy/Sell Analysis**:")
+    side, confidence, reasoning = determine_trade_side_enhanced(sample, debug=True)
+
+# --- HELPER FUNCTIONS ---
+def parse_option_chain(opt_str):
+    try:
+        ticker = ''.join([c for c in opt_str if c.isalpha()])[:-1]
+        date_start = len(ticker)
+        date_str = opt_str[date_start:date_start+6]
+        expiry_date = date(2000 + int(date_str[:2]), int(date_str[2:4]), int(date_str[4:6]))
+        dte = (expiry_date - date.today()).days
+        option_type = opt_str[date_start+6].upper()
+        strike = int(opt_str[date_start+7:]) / 1000
+        return ticker, expiry_date.strftime('%Y-%m-%d'), dte, option_type, strike
+    except Exception:
+        return None, None, None, None, None
+
 def analyze_open_interest(trade_data, ticker_trades):
-    """Analyze open interest patterns for the trade"""
+    """
+    Analyze open interest patterns for the trade
+    """
     try:
         oi = float(trade_data.get('open_interest', 0))
         volume = float(trade_data.get('volume', 0))
@@ -1132,9 +608,11 @@ def analyze_open_interest(trade_data, ticker_trades):
     
     return analysis
 
-# [All original pattern recognition functions remain the same...]
+# --- NEW PATTERN RECOGNITION FUNCTIONS ---
 def detect_multi_leg_strategies(ticker_trades):
-    """Detect multi-leg option strategies like spreads, straddles, and collars"""
+    """
+    Detect multi-leg option strategies like spreads, straddles, and collars
+    """
     strategies = []
     
     # Group trades by ticker and time window
@@ -1232,7 +710,9 @@ def detect_multi_leg_strategies(ticker_trades):
     return strategies
 
 def detect_gamma_squeeze_indicators(ticker_trades):
-    """Detect potential gamma squeeze conditions"""
+    """
+    Detect potential gamma squeeze conditions
+    """
     gamma_indicators = []
     
     # Group by ticker
@@ -1286,7 +766,9 @@ def detect_gamma_squeeze_indicators(ticker_trades):
     return gamma_indicators
 
 def detect_iv_spikes(ticker_trades):
-    """Detect unusual IV spikes that may indicate upcoming events"""
+    """
+    Detect unusual IV spikes that may indicate upcoming events
+    """
     iv_alerts = []
     
     # Group by ticker
@@ -1341,7 +823,9 @@ def detect_iv_spikes(ticker_trades):
     return iv_alerts
 
 def analyze_cross_asset_correlation(ticker_trades):
-    """Analyze correlations between options flow and identify related movements"""
+    """
+    Analyze correlations between options flow and identify related movements
+    """
     correlations = []
     
     # Group by sector/industry (simplified mapping)
@@ -1645,7 +1129,7 @@ def generate_enhanced_alerts(trades):
 
     return sorted(alerts, key=lambda x: -x.get('alert_score', 0))
 
-# --- FETCH FUNCTIONS ---
+# --- SHORT-TERM ETF SCANNER ---
 def parse_option_chain_simple(opt_str):
     """Simplified option chain parser for ETF scanner"""
     try:
@@ -1747,6 +1231,7 @@ def fetch_etf_trades():
         st.error(f"Error fetching ETF trades: {e}")
         return []
 
+# --- FETCH FUNCTION ---
 def fetch_general_flow():
     params = {
         'issue_types[]': ['Common Stock', 'ADR'],
@@ -1852,370 +1337,7 @@ def fetch_general_flow():
         st.error(f"Error fetching general flow: {e}")
         return []
 
-# --- ENHANCED DISPLAY FUNCTIONS ---
-
-def display_enhanced_dashboard():
-    """NEW: Enhanced dashboard with real-time metrics"""
-    st.markdown("### 📊 Live Dashboard")
-    
-    # Get market context
-    market_context = get_market_context()
-    
-    # Real-time status bar
-    col1, col2, col3, col4, col5 = st.columns(5)
-    
-    with col1:
-        # Market session indicator
-        market_session = market_context.get('market_session', 'Unknown')
-        session_emoji = "🌅" if market_session == "Pre-Market" else "🔴" if market_session == "Regular Hours" else "🌙"
-        st.metric("Market Session", f"{session_emoji} {market_session}")
-    
-    with col2:
-        # Volatility regime
-        vol_regime = market_context.get('volatility_regime', 'Unknown')
-        vol_emoji = "📈" if vol_regime == "High" else "📊"
-        st.metric("Volatility", f"{vol_emoji} {vol_regime}")
-    
-    with col3:
-        # Active alerts count
-        active_alerts = st.session_state.get('active_alerts_count', 0)
-        st.metric("Active Alerts", active_alerts, delta="🔥" if active_alerts > 5 else None)
-    
-    with col4:
-        # Position tracking status
-        tracked_count = len(st.session_state.get('tracked_positions', {}))
-        tracking_emoji = "📍" if tracked_count > 0 else "⚪"
-        st.metric("Tracked Positions", f"{tracking_emoji} {tracked_count}")
-    
-    with col5:
-        # Performance summary
-        performance_data = performance_tracker.get_performance_summary()
-        win_rate = performance_data.get('win_rate', 0)
-        win_emoji = "🟢" if win_rate > 0.6 else "🟡" if win_rate > 0.4 else "🔴"
-        st.metric("Win Rate", f"{win_emoji} {win_rate:.0%}")
-    
-    # Market context details
-    with st.expander("🌍 Market Context Details", expanded=False):
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write(f"**Market Sentiment:** {market_context.get('market_sentiment', 'Unknown')}")
-            st.write(f"**Options Flow:** {market_context.get('options_flow_sentiment', 'Unknown')}")
-            st.write(f"**Gamma Environment:** {market_context.get('gamma_environment', 'Unknown')}")
-        
-        with col2:
-            st.write(f"**Sector Rotation:** {market_context.get('sector_rotation', 'Unknown')}")
-            st.write(f"**Institutional Activity:** {market_context.get('institutional_activity', 'Unknown')}")
-            st.write(f"**Last Updated:** {market_context.get('last_updated', 'Unknown')}")
-
-def display_performance_dashboard():
-    """NEW: Performance tracking dashboard"""
-    st.markdown("### 📈 Performance Analytics")
-    
-    performance_data = performance_tracker.get_performance_summary()
-    
-    if performance_data.get('total_trades_tracked', 0) == 0:
-        st.info("📊 No performance data available yet. Run some scans to start tracking!")
-        return
-    
-    # Performance metrics
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        total_tracked = performance_data.get('total_trades_tracked', 0)
-        st.metric("Total Tracked", total_tracked)
-    
-    with col2:
-        win_rate = performance_data.get('win_rate', 0)
-        st.metric("Win Rate", f"{win_rate:.1%}", delta="🎯")
-    
-    with col3:
-        transfer_rate = performance_data.get('transfer_rate', 0)
-        st.metric("Transfer Rate", f"{transfer_rate:.1%}", delta="🔄")
-    
-    with col4:
-        avg_pnl = performance_data.get('avg_pnl_per_trade', 0)
-        pnl_color = "🟢" if avg_pnl > 0 else "🔴" if avg_pnl < 0 else "⚪"
-        st.metric("Avg P&L/Trade", f"{pnl_color} ${avg_pnl:,.0f}")
-    
-    # Backtesting results
-    backtest_results = backtest_engine.validate_prediction_accuracy()
-    
-    if backtest_results:
-        st.markdown("#### 🔬 Prediction Accuracy Analysis")
-        
-        confidence_analysis = backtest_results['confidence_analysis']
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("**📊 Transfer Rates by Confidence Level:**")
-            st.write(f"🟢 **High Confidence (80%+):** {confidence_analysis['high_confidence_rate']:.1%} ({confidence_analysis['high_conf_count']} trades)")
-            st.write(f"🟡 **Medium Confidence (50-79%):** {confidence_analysis['medium_confidence_rate']:.1%} ({confidence_analysis['med_conf_count']} trades)")
-            st.write(f"🔴 **Low Confidence (<50%):** {confidence_analysis['low_confidence_rate']:.1%} ({confidence_analysis['low_conf_count']} trades)")
-            
-            overall_rate = backtest_results['overall_transfer_rate']
-            st.write(f"📈 **Overall Transfer Rate:** {overall_rate:.1%}")
-        
-        with col2:
-            st.markdown("**🎯 Scenario Effectiveness:**")
-            scenario_effectiveness = backtest_results['scenario_effectiveness']
-            
-            # Best scenarios
-            best_scenarios = backtest_results.get('best_scenarios', [])
-            if best_scenarios:
-                st.write("**🟢 Best Performing Scenarios:**")
-                for scenario in best_scenarios[:3]:
-                    rate = scenario_effectiveness.get(scenario, 0)
-                    st.write(f"• {scenario}: {rate:.0%}")
-            
-            # Worst scenarios
-            worst_scenarios = backtest_results.get('worst_scenarios', [])
-            if worst_scenarios:
-                st.write("**🔴 Underperforming Scenarios:**")
-                for scenario in worst_scenarios[:3]:
-                    rate = scenario_effectiveness.get(scenario, 0)
-                    st.write(f"• {scenario}: {rate:.0%}")
-
-def display_advanced_alerts(trades):
-    """NEW: Enhanced alert system with smart scoring"""
-    st.markdown("### 🚨 Smart Alert System")
-    
-    # Generate enhanced alerts
-    smart_alerts = alert_manager.generate_smart_alerts(trades)
-    
-    if not smart_alerts:
-        st.info("🔍 No high-priority alerts found with current criteria")
-        return
-    
-    # Store alert count for dashboard
-    st.session_state.active_alerts_count = len(smart_alerts)
-    
-    # Alert summary
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        critical_alerts = len([a for a in smart_alerts if a.get('alert_priority') == '🔴 CRITICAL'])
-        st.metric("Critical Alerts", critical_alerts, delta="🚨" if critical_alerts > 0 else None)
-    
-    with col2:
-        high_alerts = len([a for a in smart_alerts if a.get('alert_priority') == '🟠 HIGH'])
-        st.metric("High Priority", high_alerts)
-    
-    with col3:
-        avg_score = np.mean([a.get('enhanced_alert_score', 0) for a in smart_alerts])
-        st.metric("Avg Alert Score", f"{avg_score:.1f}")
-    
-    with col4:
-        auto_notifications = len([a for a in smart_alerts if a.get('enhanced_alert_score', 0) >= config.CRITICAL_ALERT_THRESHOLD])
-        st.metric("Auto Notifications", auto_notifications, delta="📱" if auto_notifications > 0 else None)
-    
-    # Display alerts
-    for i, alert in enumerate(smart_alerts[:15], 1):  # Top 15 alerts
-        priority = alert.get('alert_priority', '🟢 LOW')
-        enhanced_score = alert.get('enhanced_alert_score', 0)
-        score_breakdown = alert.get('score_breakdown', {})
-        
-        with st.container():
-            # Alert header with priority
-            col1, col2 = st.columns([4, 1])
-            
-            with col1:
-                enhanced_side = alert.get('enhanced_side', 'UNKNOWN')
-                confidence = alert.get('side_confidence', 0)
-                
-                side_emoji = "🟢" if 'BUY' in enhanced_side else "🔴" if 'SELL' in enhanced_side else "⚪"
-                conf_emoji = "🟢" if confidence >= 0.7 else "🟡" if confidence >= 0.4 else "🔴"
-                
-                st.markdown(f"**{i}. {priority} {side_emoji} {alert['ticker']} "
-                           f"{alert['strike']:.0f}{alert['type']} {alert['expiry']} ({alert['dte']}d)**")
-                
-                # Key metrics
-                col_a, col_b, col_c = st.columns(3)
-                with col_a:
-                    st.write(f"💰 Premium: ${alert['premium']:,.0f}")
-                    st.write(f"📊 Vol/OI: {alert.get('vol_oi_ratio', 0):.1f}")
-                
-                with col_b:
-                    st.write(f"🎯 Side: {enhanced_side} {conf_emoji}")
-                    st.write(f"📈 IV: {alert.get('iv_percentage', 'N/A')}")
-                
-                with col_c:
-                    st.write(f"🔥 Score: {enhanced_score:.1f}")
-                    st.write(f"⏱️ Time: {alert.get('time_ny', 'N/A')}")
-            
-            with col2:
-                # Score breakdown
-                st.metric("Enhanced Score", f"{enhanced_score:.1f}")
-                
-                # Show detailed breakdown in expander
-                with st.expander("Score Details", expanded=False):
-                    for component, score in score_breakdown.items():
-                        if score > 0:
-                            st.write(f"• {component.title()}: +{score:.1f}")
-            
-            # Alert details
-            st.write(f"🎯 **Scenarios:** {', '.join(alert.get('scenarios', []))}")
-            
-            # Enhanced reasoning
-            reasons = alert.get('reasons', [])
-            if reasons:
-                st.write(f"📍 **Alert Reasons:** {', '.join(reasons)}")
-            
-            # Send notification for critical alerts
-            if enhanced_score >= config.CRITICAL_ALERT_THRESHOLD:
-                alert_manager.send_notification(alert)
-            
-            st.divider()
-
-def display_market_context_analysis(trades):
-    """NEW: Market context-aware analysis"""
-    st.markdown("### 🌍 Market Context Analysis")
-    
-    market_context = get_market_context()
-    
-    # Contextualize trades
-    contextualized_trades = trades.copy()  # In real implementation, would use contextualize_trades function
-    
-    # Market regime analysis
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("**📊 Current Market Environment:**")
-        
-        # Market session impact
-        session = market_context.get('market_session', 'Unknown')
-        if session == "Pre-Market":
-            st.info("🌅 **Pre-Market Session**: Focus on earnings reactions and overnight news")
-        elif session == "Regular Hours":
-            st.success("🔴 **Regular Hours**: Full liquidity and institutional activity")
-        elif session == "After Hours":
-            st.warning("🌙 **After Hours**: Limited liquidity, focus on major news")
-        
-        # Volatility regime
-        vol_regime = market_context.get('volatility_regime', 'Unknown')
-        if vol_regime == "High":
-            st.warning("📈 **High Volatility**: Increased option premiums, higher risk/reward")
-        else:
-            st.info("📊 **Low Volatility**: Cheaper premiums, potential for volatility expansion")
-    
-    with col2:
-        st.markdown("**🎯 Trading Environment Insights:**")
-        
-        # Sentiment analysis
-        sentiment = market_context.get('market_sentiment', 'Unknown')
-        options_flow = market_context.get('options_flow_sentiment', 'Unknown')
-        
-        if sentiment == "Bullish" and options_flow == "Call Heavy":
-            st.success("🟢 **Aligned Bullish**: Market sentiment matches options flow")
-        elif sentiment == "Bearish" and options_flow == "Put Heavy":
-            st.error("🔴 **Aligned Bearish**: Defensive positioning confirmed")
-        elif sentiment != options_flow.split()[0]:
-            st.warning("⚠️ **Divergence**: Options flow contrarian to market sentiment")
-        
-        # Gamma environment
-        gamma_env = market_context.get('gamma_environment', 'Unknown')
-        if gamma_env == "High Gamma":
-            st.info("⚡ **High Gamma Environment**: Potential for sharp moves near strikes")
-    
-    # Context-based trade filtering
-    st.markdown("#### 🎯 Context-Aware Trade Highlights")
-    
-    # Filter trades based on market context
-    if market_context.get('volatility_regime') == 'Low':
-        vol_expansion_plays = [t for t in trades if t.get('iv', 0) < 0.25 and 'BUY' in t.get('enhanced_side', '')]
-        if vol_expansion_plays:
-            st.markdown("**📊 Volatility Expansion Candidates:**")
-            for trade in vol_expansion_plays[:5]:
-                st.write(f"• {trade['ticker']} {trade['strike']:.0f}{trade['type']} - "
-                        f"IV: {trade.get('iv', 0):.1%}, Premium: ${trade['premium']:,.0f}")
-    
-    if market_context.get('institutional_activity') == 'High':
-        institutional_trades = [t for t in trades if t.get('premium', 0) > 500000]
-        if institutional_trades:
-            st.markdown("**🏢 High Institutional Activity Window:**")
-            for trade in institutional_trades[:3]:
-                st.write(f"• {trade['ticker']} {trade['strike']:.0f}{trade['type']} - "
-                        f"Premium: ${trade['premium']:,.0f}, Side: {trade.get('enhanced_side', 'Unknown')}")
-
-def display_pattern_recognition_v2(trades):
-    """NEW: Enhanced pattern recognition with advanced algorithms"""
-    st.markdown("### 🎯 Advanced Pattern Recognition")
-    
-    if not trades:
-        st.info("No trades available for pattern analysis")
-        return
-    
-    # Group trades by ticker for analysis
-    ticker_groups = defaultdict(list)
-    for trade in trades:
-        ticker_groups[trade.get('ticker', '')].append(trade)
-    
-    # Enhanced pattern detection
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("#### 🕳️ Dark Pool Activity Detection")
-        all_dark_pool = []
-        for ticker, ticker_trades in ticker_groups.items():
-            dark_pool = detect_dark_pool_activity(ticker_trades)
-            all_dark_pool.extend(dark_pool)
-        
-        if all_dark_pool:
-            for pattern in all_dark_pool[:5]:
-                risk_emoji = "🔴" if pattern['risk_level'] == 'High' else "🟡"
-                st.write(f"**{risk_emoji} {pattern['ticker']} - {pattern['pattern']}**")
-                st.write(f"• Time: {pattern['time_window']} | Trades: {pattern['trade_count']}")
-                st.write(f"• Premium: ${pattern['total_premium']:,.0f} | Side: {pattern['dominant_side']}")
-                st.write(f"• Confidence: {pattern['confidence']} | Avg Conf: {pattern['avg_confidence']:.0%}")
-                st.write("---")
-        else:
-            st.info("No dark pool activity detected")
-    
-    with col2:
-        st.markdown("#### 📅 Earnings Play Detection")
-        all_earnings = []
-        for ticker, ticker_trades in ticker_groups.items():
-            earnings = detect_earnings_plays(ticker_trades)
-            all_earnings.extend(earnings)
-        
-        if all_earnings:
-            for play in all_earnings[:5]:
-                confidence_emoji = "🟢" if play['confidence'] == 'High' else "🟡" if play['confidence'] == 'Medium' else "🔴"
-                st.write(f"**{confidence_emoji} {play['ticker']} {play['strike']:.0f}{play['type']}**")
-                st.write(f"• IV: {play['iv']:.1%} | DTE: {play['dte']} | {play['event_proximity']}")
-                st.write(f"• Premium: ${play['premium']:,.0f}")
-                st.write(f"• Earnings Score: {play['earnings_score']:.1f}")
-                st.write("---")
-        else:
-            st.info("No earnings plays detected")
-    
-    # Institutional flow patterns
-    st.markdown("#### 🏢 Institutional Flow Patterns")
-    institutional_patterns = []
-    for ticker, ticker_trades in ticker_groups.items():
-        patterns = detect_institutional_flow_patterns(ticker_trades)
-        institutional_patterns.extend(patterns)
-    
-    if institutional_patterns:
-        inst_data = []
-        for pattern in institutional_patterns[:10]:
-            inst_data.append({
-                'Ticker': pattern['ticker'],
-                'Pattern': pattern['pattern_type'],
-                'Total Premium': f"${pattern['total_premium']:,.0f}",
-                'Large Trades': pattern['large_trade_count'],
-                'Total Trades': pattern['total_trade_count'],
-                'Call/Put Ratio': f"{pattern['call_put_ratio']:.1f}",
-                'Buy Ratio': f"{pattern['buy_ratio']:.1%}",
-                'Confidence': pattern['confidence']
-            })
-        
-        df = pd.DataFrame(inst_data)
-        st.dataframe(df, use_container_width=True)
-    else:
-        st.info("No institutional patterns detected")
-
-# --- ENHANCED FILTER FUNCTIONS ---
+# --- FILTER FUNCTIONS ---
 def apply_premium_filter(trades, premium_range):
     if premium_range == "All Premiums (No Filter)":
         return trades
@@ -2281,422 +1403,7 @@ def apply_trade_side_filter(trades, side_filter):
     
     return filtered_trades
 
-# --- ENHANCED UI COMPONENTS ---
-def create_smart_sidebar():
-    """NEW: Enhanced sidebar with smart suggestions"""
-    with st.sidebar:
-        st.markdown("## 🎛️ Enhanced Control Panel")
-        
-        # Market context indicator
-        market_context = get_market_context()
-        session = market_context.get('market_session', 'Unknown')
-        session_emoji = "🌅" if session == "Pre-Market" else "🔴" if session == "Regular Hours" else "🌙"
-        st.info(f"{session_emoji} **{session}** | {market_context.get('market_sentiment', 'Unknown')} Sentiment")
-        
-        scan_type = st.selectbox(
-            "Select Analysis Type:",
-            [
-                "🔍 Main Flow Analysis",
-                "📍 Position Tracking Dashboard",
-                "📈 Performance Analytics", # NEW
-                "🚨 Smart Alert System",    # NEW
-                "🌍 Market Context Analysis", # NEW
-                "🎯 Advanced Pattern Recognition", # NEW
-                "📊 Open Interest Deep Dive", 
-                "🔄 Enhanced Buy/Sell Analysis",
-                "⚡ ETF Flow Scanner"
-            ]
-        )
-        
-        # Enhanced tracking status
-        if 'tracked_positions' in st.session_state:
-            tracked_count = len(st.session_state.tracked_positions)
-            active_count = len([p for p in st.session_state.tracked_positions.values() 
-                              if p['tracking_status'] == 'Active'])
-            
-            st.markdown("### 📍 Enhanced Tracking Status")
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Active", active_count)
-            with col2:
-                st.metric("Total", tracked_count)
-            
-            # Performance preview
-            performance_data = performance_tracker.get_performance_summary()
-            if performance_data.get('total_trades_tracked', 0) > 0:
-                transfer_rate = performance_data.get('transfer_rate', 0)
-                st.progress(transfer_rate)
-                st.caption(f"Transfer Rate: {transfer_rate:.1%}")
-        
-        # Smart filter suggestions
-        st.markdown("### 🎯 Smart Filter Suggestions")
-        current_hour = datetime.now().hour
-        
-        # Time-based suggestions
-        if 9 <= current_hour <= 10:
-            if st.button("🌅 Morning Momentum", use_container_width=True, help="High Vol/OI ratios for opening moves"):
-                st.session_state.smart_filter_suggestion = "morning_momentum"
-        elif 15 <= current_hour <= 16:
-            if st.button("🌆 Power Hour Gamma", use_container_width=True, help="0DTE and weekly plays"):
-                st.session_state.smart_filter_suggestion = "power_hour"
-        
-        # Market context suggestions
-        volatility = market_context.get('volatility_regime', 'Unknown')
-        if volatility == 'Low':
-            if st.button("📊 Vol Expansion", use_container_width=True, help="Low IV plays for volatility expansion"):
-                st.session_state.smart_filter_suggestion = "vol_expansion"
-        elif volatility == 'High':
-            if st.button("📉 Vol Crush Setup", use_container_width=True, help="High IV short-term plays"):
-                st.session_state.smart_filter_suggestion = "vol_crush"
-        
-        # Regular filters
-        st.markdown("### 💰 Premium Range Filter")
-        premium_range = st.selectbox(
-            "Select Premium Range:",
-            [
-                "All Premiums (No Filter)",
-                "Under $100K",
-                "Under $250K", 
-                "$100K - $250K",
-                "$250K - $500K",
-                "Above $250K",
-                "Above $500K",
-                "Above $1M"
-            ],
-            index=0
-        )
-        
-        st.markdown("### 📅 Time to Expiry Filter")
-        dte_filter = st.selectbox(
-            "Select DTE Range:",
-            [
-                "All DTE",
-                "0DTE Only",
-                "Weekly (≤7d)",
-                "Monthly (≤30d)",
-                "Quarterly (≤90d)",
-                "LEAPS (>90d)"
-            ],
-            index=0
-        )
-        
-        st.markdown("### 🔄 Trade Side Filter")
-        side_filter = st.selectbox(
-            "Filter by Trade Side:",
-            [
-                "All Trades",
-                "Buy Only",
-                "Sell Only", 
-                "High Confidence Only",
-                "Medium+ Confidence"
-            ],
-            index=0
-        )
-        
-        # Advanced options
-        st.markdown("### ⚙️ Advanced Options")
-        enable_notifications = st.checkbox("📱 Enable Notifications", 
-                                         value=config.ENABLE_NOTIFICATIONS,
-                                         help="Send alerts for critical trades")
-        
-        debug_mode = st.checkbox("🔧 Debug Mode", help="Show diagnostics and detailed analysis")
-        
-        # Performance tracking toggle
-        enable_performance = st.checkbox("📈 Performance Tracking", 
-                                       value=config.ENABLE_PERFORMANCE_TRACKING,
-                                       help="Track prediction accuracy and P&L")
-        
-        run_scan = st.button("🚀 Run Enhanced Scan", type="primary", use_container_width=True)
-        
-        return scan_type, premium_range, dte_filter, side_filter, debug_mode, enable_notifications, enable_performance, run_scan
-
-# --- CSV EXPORT WITH ENHANCED DATA ---
-def save_enhanced_csv(trades, filename_prefix):
-    """Enhanced CSV export with all new fields"""
-    if not trades:
-        st.warning("No data to save")
-        return
-        
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{filename_prefix}_enhanced_{timestamp}.csv"
-    
-    csv_data = []
-    for trade in trades:
-        row = trade.copy()
-        
-        # Flatten complex objects
-        if isinstance(row.get('reasons'), list):
-            row['reasons'] = ', '.join(row['reasons'])
-        if isinstance(row.get('scenarios'), list):
-            row['scenarios'] = ', '.join(row['scenarios'])
-        if isinstance(row.get('side_reasoning'), list):
-            row['side_reasoning'] = ', '.join(row['side_reasoning'])
-        
-        # Flatten OI analysis
-        if isinstance(row.get('oi_analysis'), dict):
-            oi_analysis = row['oi_analysis']
-            row['oi_level'] = oi_analysis.get('oi_level', '')
-            row['liquidity_score'] = oi_analysis.get('liquidity_score', '')
-            row['oi_change_indicator'] = oi_analysis.get('oi_change_indicator', '')
-            del row['oi_analysis']
-        
-        # Flatten score breakdown
-        if isinstance(row.get('score_breakdown'), dict):
-            breakdown = row['score_breakdown']
-            for key, value in breakdown.items():
-                row[f'score_{key}'] = value
-            del row['score_breakdown']
-        
-        # Add market context if available
-        market_context = get_market_context()
-        row['market_session_at_scan'] = market_context.get('market_session', 'Unknown')
-        row['market_sentiment_at_scan'] = market_context.get('market_sentiment', 'Unknown')
-        row['volatility_regime_at_scan'] = market_context.get('volatility_regime', 'Unknown')
-        
-        csv_data.append(row)
-    
-    df = pd.DataFrame(csv_data)
-    csv = df.to_csv(index=False)
-    
-    st.download_button(
-        label=f"📥 Download Enhanced {filename}",
-        data=csv,
-        file_name=filename,
-        mime="text/csv",
-        use_container_width=True
-    )
-
-# --- MAIN STREAMLIT APP ---
-st.set_page_config(
-    page_title="Enhanced Options Flow Tracker v2.0", 
-    page_icon="🚀", 
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-st.title("🚀 Enhanced Options Flow Tracker v2.0")
-st.markdown("### Professional Options Flow Analysis with AI-Powered Insights")
-
-# Initialize performance tracking
-performance_tracker.initialize_performance_tracking()
-
-# Create enhanced sidebar
-scan_type, premium_range, dte_filter, side_filter, debug_mode, enable_notifications, enable_performance, run_scan = create_smart_sidebar()
-
-# Show enhanced dashboard at top
-display_enhanced_dashboard()
-
-# Handle smart filter suggestions
-if hasattr(st.session_state, 'smart_filter_suggestion'):
-    suggestion = st.session_state.smart_filter_suggestion
-    if suggestion == "morning_momentum":
-        # Apply morning momentum filters
-        st.info("🌅 Applied Morning Momentum filters: High Vol/OI + Buy trades")
-        side_filter = "Buy Only"
-    elif suggestion == "power_hour":
-        # Apply power hour filters  
-        st.info("🌆 Applied Power Hour filters: Weekly DTE + High premium")
-        dte_filter = "Weekly (≤7d)"
-        premium_range = "Above $250K"
-    elif suggestion == "vol_expansion":
-        st.info("📊 Applied Volatility Expansion filters: Focus on low IV plays")
-    elif suggestion == "vol_crush":
-        st.info("📉 Applied Volatility Crush filters: High IV short-term plays")
-        dte_filter = "Weekly (≤7d)"
-    
-    # Clear suggestion
-    del st.session_state.smart_filter_suggestion
-
-# Main execution logic
-if scan_type == "📍 Position Tracking Dashboard":
-    display_position_tracking_dashboard()
-
-elif scan_type == "📈 Performance Analytics":
-    display_performance_dashboard()
-
-elif run_scan:
-    with st.spinner(f"Running {scan_type}..."):
-        if "ETF Flow Scanner" in scan_type:
-            trades = fetch_etf_trades()
-        else:
-            trades = fetch_general_flow()
-        
-        # Apply filters
-        original_count = len(trades)
-        trades = apply_premium_filter(trades, premium_range)
-        trades = apply_dte_filter(trades, dte_filter)
-        trades = apply_trade_side_filter(trades, side_filter)
-        
-        # Show filter results
-        if len(trades) != original_count:
-            st.info(f"**Enhanced Filter Results:** {original_count} → {len(trades)} trades")
-        
-        if not trades:
-            st.warning("⚠️ No trades match current filters. Try adjusting criteria.")
-        else:
-            # Enhanced scan with tracking integration
-            display_enhanced_scan_with_tracking = lambda trades: None  # Placeholder for the original function
-            
-            # Route to appropriate enhanced display
-            if "Smart Alert" in scan_type:
-                display_advanced_alerts(trades)
-            elif "Market Context" in scan_type:
-                display_market_context_analysis(trades)
-            elif "Advanced Pattern" in scan_type:
-                display_pattern_recognition_v2(trades)
-            elif "Performance" in scan_type:
-                display_performance_dashboard()
-            else:
-                # Display enhanced summary for all scan types
-                display_enhanced_summary(trades)
-                
-                # Route to specific displays (keeping original functionality)
-                # [Original display routing code would go here]
-            
-            # Enhanced export options
-            with st.expander("💾 Enhanced Export Options", expanded=False):
-                col1, col2, col3 = st.columns(3)
-                
-                with col1:
-                    save_enhanced_csv(trades, scan_type.lower().replace(" ", "_"))
-                
-                with col2:
-                    # JSON export for API integration
-                    if st.button("🔌 Export JSON", use_container_width=True):
-                        json_data = json.dumps(trades, indent=2, default=str)
-                        st.download_button(
-                            "📥 Download JSON",
-                            json_data,
-                            file_name=f"options_flow_enhanced_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
-                            mime="application/json"
-                        )
-                
-                with col3:
-                    # Performance report
-                    if st.button("📊 Performance Report", use_container_width=True):
-                        performance_data = performance_tracker.get_performance_summary()
-                        backtest_data = backtest_engine.validate_prediction_accuracy()
-                        
-                        report = {
-                            'scan_timestamp': datetime.now().isoformat(),
-                            'scan_type': scan_type,
-                            'trades_analyzed': len(trades),
-                            'performance_metrics': performance_data,
-                            'backtest_results': backtest_data,
-                            'market_context': get_market_context()
-                        }
-                        
-                        st.download_button(
-                            "📥 Download Report",
-                            json.dumps(report, indent=2, default=str),
-                            file_name=f"performance_report_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
-                            mime="application/json"
-                        )
-
-else:
-    st.markdown("""
-    ## 🚀 Welcome to Enhanced Options Flow Tracker v2.0! 
-    
-    ### 🆕 **NEW in v2.0:**
-    
-    #### 🧠 **AI-Powered Smart Alerts**
-    - **Machine Learning Score**: Enhanced scoring with historical context
-    - **Multi-Factor Analysis**: 7+ scoring components including momentum, confidence, urgency
-    - **Auto-Notifications**: Critical alerts sent to Discord/webhooks
-    - **Predictive Scoring**: Learn from past accuracy to improve future alerts
-    
-    #### 📈 **Performance Analytics**
-    - **Real-Time P&L Tracking**: Theoretical performance of tracked positions
-    - **Prediction Accuracy**: Validate how well buy/sell detection works
-    - **Win Rate Analysis**: Track success rates by confidence level
-    - **Scenario Effectiveness**: Which patterns actually transfer
-    
-    #### 🔍 **Advanced Pattern Recognition**
-    - **Dark Pool Detection**: Identify institutional block activity
-    - **Earnings Play Recognition**: High IV + short DTE detection  
-    - **Institutional Flow Patterns**: Coordinated large trade analysis
-    - **Multi-Timeframe Analysis**: 5-minute window pattern matching
-    
-    #### 🌍 **Market Context Integration**
-    - **Real-Time Market Regime**: Volatility, sentiment, session analysis
-    - **Context-Aware Filtering**: Smart suggestions based on market conditions
-    - **Timing Intelligence**: Pre-market, power hour, after-hours insights
-    - **Volatility Regime Detection**: High/low vol environment analysis
-    
-    #### 🎯 **Smart Filter System**
-    - **Time-Based Suggestions**: Morning momentum, power hour gamma
-    - **Market-Adaptive**: Filters change based on volatility regime
-    - **One-Click Presets**: Vol expansion, earnings plays, dark pool activity
-    - **Context-Sensitive**: Different suggestions for different market sessions
-    
-    #### 📊 **Enhanced Position Tracking**
-    - **Predictive Modeling**: Expected transfer probability scoring
-    - **Sentiment Shift Analysis**: Track if buying continues or shifts to selling
-    - **Momentum Scoring**: 100-point momentum scale for follow-up activity
-    - **Market Context Storage**: Remember market conditions at entry
-    
-    #### 🔬 **Backtesting Engine**
-    - **Historical Validation**: Test prediction accuracy on past data
-    - **Confidence Calibration**: How accurate are different confidence levels?
-    - **Scenario Ranking**: Which patterns perform best/worst
-    - **Transfer Rate Analysis**: Validation of tracking effectiveness
-    
-    #### 📱 **Professional Integration**
-    - **Discord Webhooks**: Auto-notifications for critical alerts
-    - **JSON API Export**: Integration with external tools
-    - **Enhanced CSV**: All new fields and market context data
-    - **Performance Reports**: Comprehensive analytics export
-    
-    ### 🎯 **Getting Started with v2.0:**
-    
-    1. **📊 Performance Analytics**: See your historical accuracy and win rates
-    2. **🚨 Smart Alert System**: Get AI-powered alerts with enhanced scoring  
-    3. **🌍 Market Context Analysis**: Trades analyzed with current market regime
-    4. **🎯 Advanced Pattern Recognition**: Dark pool, earnings, institutional flows
-    5. **📍 Position Tracking**: Enhanced with predictive modeling and momentum
-    
-    ### 💡 **Pro Tips for v2.0:**
-    
-    #### 🎯 **Smart Filter Usage:**
-    - **Morning (9-10am)**: Use "Morning Momentum" for opening plays
-    - **Power Hour (3-4pm)**: Use "Power Hour Gamma" for 0DTE action  
-    - **Low Vol Environment**: Use "Vol Expansion" filter
-    - **High Vol Environment**: Use "Vol Crush Setup" filter
-    
-    #### 🧠 **Smart Alert Optimization:**
-    - **Critical Alerts (10+ score)**: Auto-notifications enabled
-    - **High Priority (8-9.9 score)**: Manual review recommended
-    - **Score Breakdown**: Check what drives each alert score
-    - **Historical Context**: Alerts learn from past similar trades
-    
-    #### 📈 **Performance Tracking Best Practices:**
-    - **Track 30+ positions** for statistical significance
-    - **Focus on High Confidence** trades for best transfer rates
-    - **Monitor scenario effectiveness** - which patterns actually work
-    - **Use backtesting** to validate and improve detection accuracy
-    
-    #### 🎯 **Pattern Recognition Mastery:**
-    - **Dark Pool Activity**: Look for 3+ large trades in 5-minute windows
-    - **Earnings Plays**: High IV + short DTE + large premium combinations
-    - **Institutional Flows**: Coordinated activity across multiple strikes
-    - **Multi-leg Strategies**: Spreads, straddles, collars detection
-    
-    ### 🔥 **What's Most Powerful in v2.0:**
-    
-    1. **🚨 Smart Alerts with ML Scoring** - Game-changing alert quality
-    2. **📈 Performance Validation** - Finally know if your edge is real
-    3. **🎯 Dark Pool Detection** - Catch institutional block activity
-    4. **🌍 Market Context** - Trade with the market regime, not against it
-    5. **🔬 Backtesting** - Validate every prediction with historical data
-    
-    ### 🚀 **Ready to Get Started?**
-    
-    Select your analysis type from the sidebar and click "Run Enhanced Scan" to experience the next generation of options flow analysis!
-    
-    **v2.0 transforms options flow from pattern recognition into predictive intelligence.**
-    """)
-
-# --- ORIGINAL DISPLAY FUNCTIONS (ENHANCED VERSIONS) ---
+# --- DISPLAY FUNCTIONS ---
 def display_enhanced_summary(trades):
     st.markdown("### 📊 Enhanced Market Summary")
     
@@ -2704,69 +1411,983 @@ def display_enhanced_summary(trades):
         st.warning("No trades to analyze")
         return
     
-    # Get market context for enhanced analysis
-    market_context = get_market_context()
-    
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         sentiment_ratio, sentiment_label = calculate_sentiment_score(trades)
-        context_emoji = "🟢" if market_context.get('market_sentiment') == 'Bullish' else "🔴" if market_context.get('market_sentiment') == 'Bearish' else "⚪"
-        st.metric("Market Sentiment", f"{context_emoji} {sentiment_label}", f"{sentiment_ratio:.1%} calls")
+        st.metric("Market Sentiment", sentiment_label, f"{sentiment_ratio:.1%} calls")
     
     with col2:
         total_premium = sum(t.get('premium', 0) for t in trades)
-        daily_avg = total_premium / max(len(set(t.get('time_ny', '')[:5] for t in trades)), 1)  # Rough hourly average
-        st.metric("Total Premium", f"${total_premium:,.0f}", f"${daily_avg:,.0f}/hr avg")
+        st.metric("Total Premium", f"${total_premium:,.0f}")
     
     with col3:
         buy_trades = len([t for t in trades if 'BUY' in t.get('enhanced_side', '')])
         sell_trades = len([t for t in trades if 'SELL' in t.get('enhanced_side', '')])
-        buy_ratio = buy_trades / max(buy_trades + sell_trades, 1)
-        ratio_emoji = "🟢" if buy_ratio > 0.6 else "🔴" if buy_ratio < 0.4 else "⚪"
-        st.metric("Buy vs Sell", f"{ratio_emoji} {buy_trades}/{sell_trades}", f"{buy_ratio:.1%} buys")
+        st.metric("Buy vs Sell", f"{buy_trades}/{sell_trades}")
     
     with col4:
         high_conf_trades = len([t for t in trades if 'High Confidence' in t.get('enhanced_side', '')])
-        conf_ratio = high_conf_trades / max(len(trades), 1)
-        conf_emoji = "🟢" if conf_ratio > 0.3 else "🟡" if conf_ratio > 0.15 else "🔴"
-        st.metric("High Confidence", f"{conf_emoji} {high_conf_trades}", f"{conf_ratio:.1%} of total")
+        st.metric("High Confidence", high_conf_trades)
     
-    # Enhanced insights row
+    # Enhanced buy/sell confidence analysis
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        avg_confidence = np.mean([t.get('side_confidence', 0) for t in trades]) if trades else 0
+        st.metric("Avg Confidence", f"{avg_confidence:.1%}")
+    
+    with col2:
+        medium_plus_conf = len([t for t in trades if t.get('side_confidence', 0) >= 0.6])
+        st.metric("Medium+ Confidence", medium_plus_conf)
+    
+    with col3:
+        unknown_trades = len([t for t in trades if 'UNKNOWN' in t.get('enhanced_side', '')])
+        st.metric("Unknown Direction", unknown_trades)
+
+def display_pattern_recognition_analysis(trades):
+    """Display advanced pattern recognition results"""
+    st.markdown("### 🔍 Advanced Pattern Recognition")
+    
+    if not trades:
+        st.info("No trades available for pattern analysis")
+        return
+    
+    # Group trades by ticker for pattern analysis
+    ticker_groups = defaultdict(list)
+    for trade in trades:
+        ticker_groups[trade.get('ticker', '')].append(trade)
+    
+    # Multi-leg strategies
+    st.markdown("#### 🎯 Multi-Leg Strategy Detection")
+    all_strategies = []
+    for ticker, ticker_trades in ticker_groups.items():
+        strategies = detect_multi_leg_strategies(ticker_trades)
+        all_strategies.extend(strategies)
+    
+    if all_strategies:
+        strategy_data = []
+        for strategy in all_strategies[:10]:  # Show top 10 strategies
+            strategy_data.append({
+                'Strategy': strategy['strategy'],
+                'Ticker': strategy['ticker'],
+                'Strikes': strategy['strikes'],
+                'Expiry': strategy['expiry'],
+                'Net Premium': f"${strategy['premium']:,.0f}",
+                'Confidence': strategy['confidence']
+            })
+        
+        df = pd.DataFrame(strategy_data)
+        st.dataframe(df, use_container_width=True)
+    else:
+        st.info("No multi-leg strategies detected")
+    
+    # Gamma squeeze indicators
+    st.markdown("#### ⚡ Gamma Squeeze Indicators")
+    gamma_indicators = []
+    for ticker, ticker_trades in ticker_groups.items():
+        indicators = detect_gamma_squeeze_indicators(ticker_trades)
+        gamma_indicators.extend(indicators)
+    
+    if gamma_indicators:
+        gamma_data = []
+        for indicator in gamma_indicators[:5]:  # Show top 5 gamma indicators
+            gamma_data.append({
+                'Ticker': indicator['ticker'],
+                'Indicator': indicator['indicator'],
+                'Key Strikes': ', '.join(indicator['strikes']),
+                'Volume': f"{indicator['total_volume']:,.0f}",
+                'Premium': f"${indicator['total_premium']:,.0f}",
+                'Vol/OI Ratio': f"{indicator['vol_oi_ratio']:.1f}",
+                'Buy Ratio': f"{indicator['buy_ratio']:.1%}",
+                'Confidence': indicator['confidence']
+            })
+        
+        df = pd.DataFrame(gamma_data)
+        st.dataframe(df, use_container_width=True)
+    else:
+        st.info("No gamma squeeze indicators detected")
+    
+    # IV spike analysis
+    st.markdown("#### 📈 Unusual IV Spikes")
+    iv_alerts = []
+    for ticker, ticker_trades in ticker_groups.items():
+        alerts = detect_iv_spikes(ticker_trades)
+        iv_alerts.extend(alerts)
+    
+    if iv_alerts:
+        iv_data = []
+        for alert in iv_alerts[:10]:  # Show top 10 IV alerts
+            if 'alert_type' in alert:
+                # Broad IV elevation
+                iv_data.append({
+                    'Ticker': alert['ticker'],
+                    'Alert Type': alert['alert_type'],
+                    'Avg IV': f"{alert['avg_iv']:.1%}",
+                    'Max IV': f"{alert['max_iv']:.1%}",
+                    'Affected Strikes': alert['affected_strikes'],
+                    'Total Premium': f"${alert['total_premium']:,.0f}",
+                    'Confidence': alert['confidence']
+                })
+            else:
+                # Individual spike
+                iv_data.append({
+                    'Ticker': alert['ticker'],
+                    'Strike': f"${alert['strike']:.0f}",
+                    'Type': alert['type'],
+                    'Expiry': alert['expiry'],
+                    'IV': f"{alert['iv']:.1%}",
+                    'IV Premium': f"{alert['iv_premium']:.1%}",
+                    'Trade Premium': f"${alert['premium']:,.0f}",
+                    'Side': alert['trade_side'],
+                    'Confidence': alert['confidence']
+                })
+        
+        df = pd.DataFrame(iv_data)
+        st.dataframe(df, use_container_width=True)
+    else:
+        st.info("No unusual IV spikes detected")
+    
+    # Cross-asset correlations
+    st.markdown("#### 🔗 Cross-Asset Correlations")
+    correlations = analyze_cross_asset_correlation(trades)
+    
+    if correlations:
+        corr_data = []
+        for corr in correlations[:8]:  # Show top 8 correlations
+            if corr['correlation_type'] == 'Sector Flow Concentration':
+                corr_data.append({
+                    'Type': corr['correlation_type'],
+                    'Sector': corr['sector'],
+                    'Tickers': ', '.join(corr['tickers']),
+                    'Total Premium': f"${corr['total_premium']:,.0f}",
+                    'Call Ratio': f"{corr['call_ratio']:.1%}",
+                    'Sentiment': corr['sentiment'],
+                    'Trade Count': corr['trade_count'],
+                    'Confidence': corr['confidence']
+                })
+        
+        df = pd.DataFrame(corr_data)
+        st.dataframe(df, use_container_width=True)
+    else:
+        st.info("No significant cross-asset correlations detected")
+
+def display_enhanced_buy_sell_analysis(trades):
+    """
+    Display enhanced buy/sell analysis with debugging information
+    """
+    st.markdown("### 🔍 Enhanced Buy/Sell Analysis")
+    
+    if not trades:
+        st.warning("No trades to analyze")
+        return
+    
+    # Calculate enhanced statistics
+    buy_trades = [t for t in trades if 'BUY' in t.get('enhanced_side', '')]
+    sell_trades = [t for t in trades if 'SELL' in t.get('enhanced_side', '')]
+    unknown_trades = [t for t in trades if 'UNKNOWN' in t.get('enhanced_side', '')]
+    high_conf_trades = [t for t in trades if t.get('side_confidence', 0) >= 0.7]
+    
+    # Display summary metrics
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        # Dark pool activity indicator
-        large_block_trades = len([t for t in trades if t.get('premium', 0) > 1000000])
-        st.metric("Mega Blocks ($1M+)", large_block_trades, delta="🏢" if large_block_trades > 0 else None)
+        st.metric("Buy Trades", len(buy_trades))
+        buy_premium = sum(t.get('premium', 0) for t in buy_trades)
+        st.write(f"💰 ${buy_premium:,.0f}")
     
     with col2:
-        # Volatility plays
-        high_iv_trades = len([t for t in trades if t.get('iv', 0) > config.EXTREME_IV_THRESHOLD])
-        st.metric("High IV Plays", high_iv_trades, delta="📈" if high_iv_trades > 5 else None)
+        st.metric("Sell Trades", len(sell_trades))
+        sell_premium = sum(t.get('premium', 0) for t in sell_trades)
+        st.write(f"💰 ${sell_premium:,.0f}")
     
     with col3:
-        # Short-term focus
-        short_term = len([t for t in trades if t.get('dte', 30) <= 7])
-        st.metric("Weekly/0DTE", short_term, delta="⚡" if short_term > len(trades) * 0.3 else None)
+        st.metric("High Confidence", len(high_conf_trades))
+        avg_confidence = np.mean([t.get('side_confidence', 0) for t in trades]) if trades else 0
+        st.write(f"📊 {avg_confidence:.1%} avg")
     
     with col4:
-        # Market context alignment
-        vol_regime = market_context.get('volatility_regime', 'Unknown')
-        regime_emoji = "📈" if vol_regime == 'High' else "📊"
-        st.metric("Vol Regime", f"{regime_emoji} {vol_regime}")
+        st.metric("Unknown/Low Conf", len(unknown_trades))
+        low_conf_trades = [t for t in trades if t.get('side_confidence', 0) < 0.4]
+        st.write(f"⚠️ {len(low_conf_trades)} low conf")
+    
+    # Display confidence distribution
+    st.markdown("#### 📊 Confidence Distribution")
+    confidence_ranges = {
+        'Very High (80%+)': len([t for t in trades if t.get('side_confidence', 0) >= 0.8]),
+        'High (60-79%)': len([t for t in trades if 0.6 <= t.get('side_confidence', 0) < 0.8]),
+        'Medium (40-59%)': len([t for t in trades if 0.4 <= t.get('side_confidence', 0) < 0.6]),
+        'Low (20-39%)': len([t for t in trades if 0.2 <= t.get('side_confidence', 0) < 0.4]),
+        'Very Low (<20%)': len([t for t in trades if t.get('side_confidence', 0) < 0.2])
+    }
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        for range_name, count in confidence_ranges.items():
+            pct = count / len(trades) * 100 if trades else 0
+            st.write(f"**{range_name}**: {count} trades ({pct:.1f}%)")
+    
+    with col2:
+        # Key insights
+        st.markdown("**💡 Key Insights:**")
+        total_trades = len(trades)
+        buy_ratio = len(buy_trades) / total_trades if total_trades > 0 else 0
+        high_conf_ratio = len(high_conf_trades) / total_trades if total_trades > 0 else 0
+        
+        if buy_ratio > 0.7:
+            st.write("• 🟢 Strong buying pressure detected")
+        elif buy_ratio < 0.3:
+            st.write("• 🔴 Strong selling pressure detected")
+        else:
+            st.write("• ⚪ Mixed buy/sell activity")
+        
+        if high_conf_ratio > 0.5:
+            st.write("• ✅ High quality trade direction data")
+        elif high_conf_ratio < 0.2:
+            st.write("• ⚠️ Limited trade direction clarity")
+        
+        if avg_confidence < 0.4:
+            st.write("• 🔧 Consider data source improvements")
+    
+    # Debug mode toggle
+    debug_mode = st.checkbox("🔧 Enable Debug Mode (shows detailed reasoning)")
+    
+    # Detailed trade table
+    st.markdown("#### 📊 Enhanced Trade Analysis")
+    
+    # Create enhanced table
+    table_data = []
+    for trade in trades[:50]:  # Show top 50 trades
+        enhanced_side = trade.get('enhanced_side', 'UNKNOWN')
+        confidence = trade.get('side_confidence', 0)
+        reasoning = trade.get('side_reasoning', [])
+        
+        # Color coding for confidence
+        if confidence >= 0.7:
+            confidence_color = "🟢"
+        elif confidence >= 0.4:
+            confidence_color = "🟡"
+        else:
+            confidence_color = "🔴"
+        
+        # Side color coding
+        if 'BUY' in enhanced_side:
+            side_emoji = "🟢"
+        elif 'SELL' in enhanced_side:
+            side_emoji = "🔴"
+        else:
+            side_emoji = "⚪"
+        
+        table_data.append({
+            'Ticker': trade.get('ticker', ''),
+            'Type': trade.get('type', ''),
+            'Strike': f"${trade.get('strike', 0):.0f}",
+            'Side': f"{side_emoji} {enhanced_side}",
+            'Confidence': f"{confidence_color} {confidence:.1%}",
+            'Premium': f"${trade.get('premium', 0):,.0f}",
+            'Vol/OI': f"{trade.get('vol_oi_ratio', 0):.1f}",
+            'Price': f"${trade.get('price', 0):.2f}" if trade.get('price', 0) != 'N/A' else 'N/A',
+            'Bid': f"${trade.get('bid', 0):.2f}" if trade.get('bid', 0) > 0 else 'N/A',
+            'Ask': f"${trade.get('ask', 0):.2f}" if trade.get('ask', 0) > 0 else 'N/A',
+            'Top Reason': reasoning[0] if reasoning else 'No clear signal',
+            'Time': trade.get('time_ny', 'N/A')
+        })
+    
+    df = pd.DataFrame(table_data)
+    st.dataframe(df, use_container_width=True)
+    
+    # Sample trade analysis in debug mode
+    if debug_mode and trades:
+        st.markdown("#### 🔍 Sample Trade Analysis")
+        sample_trade = trades[0]  # Analyze first trade as example
+        
+        st.write("**Sample Trade Data:**")
+        debug_fields = ['ticker', 'type', 'strike', 'price', 'bid', 'ask', 'volume', 'open_interest', 'description', 'rule_name']
+        sample_data = {k: v for k, v in sample_trade.items() if k in debug_fields}
+        st.json(sample_data)
+        
+        side, confidence, reasoning = determine_trade_side_enhanced(sample_trade, debug=True)
+        
+        st.write(f"**Result**: {side} (Confidence: {confidence:.1%})")
+        st.write(f"**Reasoning**: {'; '.join(reasoning)}")
+    
+    # Show trades with poor confidence for debugging
+    low_confidence_trades = [t for t in trades if t.get('side_confidence', 0) < 0.4]
+    if low_confidence_trades:
+        st.markdown("#### ⚠️ Low Confidence Trades Analysis")
+        st.write(f"Found {len(low_confidence_trades)} trades with confidence < 40%")
+        
+        # Analyze reasons for low confidence
+        no_bid_ask = len([t for t in low_confidence_trades if t.get('bid', 0) == 0 or t.get('ask', 0) == 0])
+        no_price = len([t for t in low_confidence_trades if t.get('price', 'N/A') == 'N/A'])
+        low_vol_oi = len([t for t in low_confidence_trades if t.get('vol_oi_ratio', 0) < 0.5])
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Missing Bid/Ask", no_bid_ask)
+        with col2:
+            st.metric("Missing Price", no_price)
+        with col3:
+            st.metric("Low Vol/OI", low_vol_oi)
+        
+        if st.button("Show Sample Low Confidence Trades"):
+            for i, trade in enumerate(low_confidence_trades[:5]):
+                with st.expander(f"Trade {i+1}: {trade.get('ticker')} {trade.get('strike'):.0f}{trade.get('type')}"):
+                    st.write(f"**Confidence**: {trade.get('side_confidence', 0):.1%}")
+                    st.write(f"**Reasoning**: {'; '.join(trade.get('side_reasoning', []))}")
+                    st.write(f"**Available Data**: Price={trade.get('price')}, Bid={trade.get('bid')}, Ask={trade.get('ask')}")
+                    st.write(f"**Volume/OI**: {trade.get('volume')}/{trade.get('open_interest')} (Ratio: {trade.get('vol_oi_ratio', 0):.1f})")
+
+def display_main_trades_table(trades, title="📋 Main Trades Analysis"):
+    st.markdown(f"### {title}")
+    
+    if not trades:
+        st.info("No trades found")
+        return
+    
+    # Separate calls and puts
+    calls = [t for t in trades if t['type'] == 'C']
+    puts = [t for t in trades if t['type'] == 'P']
+    
+    def create_trade_table(trade_list, trade_type_emoji, trade_type_name):
+        if not trade_list:
+            st.info(f"No {trade_type_name.lower()} found")
+            return
+        
+        # Sort by premium descending
+        sorted_trades = sorted(trade_list, key=lambda x: x.get('premium', 0), reverse=True)
+        
+        table_data = []
+        for trade in sorted_trades[:25]:  # Show top 25 per section
+            oi_analysis = trade.get('oi_analysis', {})
+            enhanced_side = trade.get('enhanced_side', 'UNKNOWN')
+            confidence = trade.get('side_confidence', 0)
+            
+            # Side display with confidence indicator
+            if 'BUY' in enhanced_side:
+                side_display = f"🟢 {enhanced_side}"
+            elif 'SELL' in enhanced_side:
+                side_display = f"🔴 {enhanced_side}"
+            else:
+                side_display = f"⚪ {enhanced_side}"
+            
+            # Confidence indicator
+            if confidence >= 0.7:
+                conf_indicator = "🟢"
+            elif confidence >= 0.4:
+                conf_indicator = "🟡"
+            else:
+                conf_indicator = "🔴"
+            
+            table_data.append({
+                'Ticker': trade['ticker'],
+                'Side': side_display,
+                'Conf': f"{conf_indicator} {confidence:.0%}",
+                'Strike': f"${trade['strike']:.0f}",
+                'Expiry': trade['expiry'],
+                'DTE': trade['dte'],
+                'Price': f"${trade['price']}" if trade['price'] != 'N/A' else 'N/A',
+                'Premium': f"${trade['premium']:,.0f}",
+                'Volume': f"{trade['volume']:,}",
+                'Open Interest': f"{trade['open_interest']:,}",
+                'Vol/OI': f"{trade['vol_oi_ratio']:.1f}",
+                'OI Level': oi_analysis.get('oi_level', 'N/A'),
+                'Liquidity': oi_analysis.get('liquidity_score', 'N/A'),
+                'IV': trade['iv_percentage'],
+                'Moneyness': trade['moneyness'],
+                'Primary Scenario': trade.get('scenarios', ['Normal Flow'])[0],
+                'Time': trade['time_ny']
+            })
+        
+        df = pd.DataFrame(table_data)
+        st.dataframe(df, use_container_width=True)
+    
+    # Display in two columns
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("#### 🟢 CALLS")
+        create_trade_table(calls, "🟢", "Calls")
+    
+    with col2:
+        st.markdown("#### 🔴 PUTS")
+        create_trade_table(puts, "🔴", "Puts")
+    
+    # Add Short-Term ETF section after calls/puts
+    st.divider()
+    display_short_term_etf_section(trades)
+
+def display_short_term_etf_section(all_trades):
+    """Display short-term ETF section as part of main analysis"""
+    st.markdown("### ⚡ Short-Term ETF Focus (SPY/QQQ/IWM ≤ 7 DTE)")
+    
+    # Filter for short-term ETF trades
+    allowed_tickers = {'QQQ', 'SPY', 'IWM'}
+    max_dte = 7
+    
+    etf_trades = [
+        t for t in all_trades 
+        if t['ticker'] in allowed_tickers and t.get('dte', 0) <= max_dte
+    ]
+    
+    if not etf_trades:
+        st.info("No short-term ETF trades found in current dataset")
+        return
+    
+    # Quick stats
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        total_premium = sum(t.get('premium', 0) for t in etf_trades)
+        st.metric("ETF Premium", f"${total_premium:,.0f}")
+    
+    with col2:
+        zero_dte = len([t for t in etf_trades if t.get('dte', 0) == 0])
+        st.metric("0DTE Trades", zero_dte)
+    
+    with col3:
+        buy_trades = len([t for t in etf_trades if 'BUY' in t.get('enhanced_side', '')])
+        sell_trades = len([t for t in etf_trades if 'SELL' in t.get('enhanced_side', '')])
+        st.metric("Buy/Sell", f"{buy_trades}/{sell_trades}")
+    
+    with col4:
+        avg_confidence = np.mean([t.get('side_confidence', 0) for t in etf_trades]) if etf_trades else 0
+        st.metric("Avg Confidence", f"{avg_confidence:.0%}")
+    
+    # Create ETF table
+    def create_etf_summary_table(trades):
+        if not trades:
+            return
+        
+        # Sort by premium descending
+        sorted_trades = sorted(trades, key=lambda x: x.get('premium', 0), reverse=True)
+        
+        table_data = []
+        for trade in sorted_trades[:15]:  # Top 15 ETF trades
+            enhanced_side = trade.get('enhanced_side', 'UNKNOWN')
+            confidence = trade.get('side_confidence', 0)
+            
+            # Side display with emoji
+            if 'BUY' in enhanced_side:
+                side_display = f"🟢 {enhanced_side}"
+            elif 'SELL' in enhanced_side:
+                side_display = f"🔴 {enhanced_side}"
+            else:
+                side_display = f"⚪ {enhanced_side}"
+            
+            table_data.append({
+                'Ticker': trade['ticker'],
+                'Type': trade['type'],
+                'Side': side_display,
+                'Conf': f"{confidence:.0%}",
+                'Strike': f"${trade['strike']:.0f}",
+                'DTE': trade.get('dte', 0),
+                'Premium': f"${trade.get('premium', 0):,.0f}",
+                'Volume': f"{trade.get('volume', 0):,}",
+                'OI': f"{trade.get('open_interest', 0):,}",
+                'Vol/OI': f"{trade.get('vol_oi_ratio', 0):.1f}",
+                'Moneyness': trade.get('moneyness', 'N/A'),
+                'Primary Scenario': trade.get('scenarios', ['Normal Flow'])[0],
+                'Time': trade.get('time_ny', 'N/A')
+            })
+        
+        df = pd.DataFrame(table_data)
+        st.dataframe(df, use_container_width=True)
+    
+    create_etf_summary_table(etf_trades)
+    
+    # Most active strikes
+    strike_activity = {}
+    for trade in etf_trades:
+        key = f"{trade['ticker']} ${trade['strike']:.0f}{trade['type']}"
+        if key not in strike_activity:
+            strike_activity[key] = {'premium': 0, 'volume': 0, 'count': 0}
+        strike_activity[key]['premium'] += trade.get('premium', 0)
+        strike_activity[key]['volume'] += trade.get('volume', 0)
+        strike_activity[key]['count'] += 1
+    
+    if strike_activity:
+        top_strikes = sorted(strike_activity.items(), 
+                           key=lambda x: x[1]['premium'], reverse=True)[:5]
+        
+        st.markdown("#### 🎯 Most Active ETF Strikes:")
+        for i, (strike_key, data) in enumerate(top_strikes, 1):
+            st.write(f"**{i}. {strike_key}** - ${data['premium']:,.0f} premium, "
+                    f"{data['volume']:,.0f} volume ({data['count']} trades)")
+
+def display_etf_scanner(trades):
+    """Display the dedicated ETF scanner section"""
+    st.markdown("### ⚡ ETF Flow Scanner (SPY/QQQ/IWM ≤ 7 DTE)")
+    
+    if not trades:
+        st.warning("No ETF trades found")
+        return
+    
+    # Summary metrics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        total_premium = sum(t['premium'] for t in trades)
+        st.metric("Total Premium", f"${total_premium:,.0f}")
+    
+    with col2:
+        zero_dte = len([t for t in trades if t['dte'] == 0])
+        st.metric("0DTE Trades", zero_dte)
+    
+    with col3:
+        buy_trades = len([t for t in trades if 'BUY' in t.get('enhanced_side', '')])
+        sell_trades = len([t for t in trades if 'SELL' in t.get('enhanced_side', '')])
+        st.metric("Buy/Sell", f"{buy_trades}/{sell_trades}")
+    
+    with col4:
+        avg_confidence = np.mean([t.get('side_confidence', 0) for t in trades]) if trades else 0
+        st.metric("Avg Confidence", f"{avg_confidence:.0%}")
+    
+    # Separate by ETF
+    spy_trades = [t for t in trades if t['ticker'] == 'SPY']
+    qqq_trades = [t for t in trades if t['ticker'] == 'QQQ']
+    iwm_trades = [t for t in trades if t['ticker'] == 'IWM']
+    
+    def create_etf_table(ticker_trades, ticker_name):
+        if not ticker_trades:
+            st.info(f"No {ticker_name} trades found")
+            return
+        
+        # Sort by premium descending
+        sorted_trades = sorted(ticker_trades, key=lambda x: x['premium'], reverse=True)
+        
+        table_data = []
+        for trade in sorted_trades[:20]:  # Top 20 per ETF
+            enhanced_side = trade.get('enhanced_side', 'UNKNOWN')
+            confidence = trade.get('side_confidence', 0)
+            
+            # Side display with confidence
+            if 'BUY' in enhanced_side:
+                side_display = f"🟢 {enhanced_side}"
+            elif 'SELL' in enhanced_side:
+                side_display = f"🔴 {enhanced_side}"
+            else:
+                side_display = f"⚪ {enhanced_side}"
+            
+            table_data.append({
+                'Type': trade['type'],
+                'Side': side_display,
+                'Conf': f"{confidence:.0%}",
+                'Strike': f"${trade['strike']:.0f}",
+                'DTE': trade['dte'],
+                'Price': f"${trade['price']:.2f}" if trade['price'] != 'N/A' else 'N/A',
+                'Premium': f"${trade['premium']:,.0f}",
+                'Volume': f"{trade['volume']:,.0f}",
+                'OI': f"{trade['oi']:,.0f}",
+                'Vol/OI': f"{trade['vol_oi_ratio']:.1f}",
+                'Moneyness': trade['moneyness'],
+                'Time': trade['time_ny'],
+                'Rule': trade.get('rule_name', 'N/A')
+            })
+        
+        df = pd.DataFrame(table_data)
+        st.dataframe(df, use_container_width=True)
+    
+    # Display each ETF in tabs
+    tab1, tab2, tab3 = st.tabs(["🕷️ SPY", "🔷 QQQ", "🔸 IWM"])
+    
+    with tab1:
+        st.markdown("#### SPY Short-Term Flow")
+        spy_premium = sum(t['premium'] for t in spy_trades)
+        spy_count = len(spy_trades)
+        spy_buy_count = len([t for t in spy_trades if 'BUY' in t.get('enhanced_side', '')])
+        st.write(f"**{spy_count} trades | ${spy_premium:,.0f} premium | {spy_buy_count} buys**")
+        create_etf_table(spy_trades, "SPY")
+    
+    with tab2:
+        st.markdown("#### QQQ Short-Term Flow")
+        qqq_premium = sum(t['premium'] for t in qqq_trades)
+        qqq_count = len(qqq_trades)
+        qqq_buy_count = len([t for t in qqq_trades if 'BUY' in t.get('enhanced_side', '')])
+        st.write(f"**{qqq_count} trades | ${qqq_premium:,.0f} premium | {qqq_buy_count} buys**")
+        create_etf_table(qqq_trades, "QQQ")
+    
+    with tab3:
+        st.markdown("#### IWM Short-Term Flow")
+        iwm_premium = sum(t['premium'] for t in iwm_trades)
+        iwm_count = len(iwm_trades)
+        iwm_buy_count = len([t for t in iwm_trades if 'BUY' in t.get('enhanced_side', '')])
+        st.write(f"**{iwm_count} trades | ${iwm_premium:,.0f} premium | {iwm_buy_count} buys**")
+        create_etf_table(iwm_trades, "IWM")
+    
+    # Key insights
+    st.markdown("#### 🔍 Key ETF Insights")
+    
+    # Most active strikes
+    strike_activity = {}
+    for trade in trades:
+        key = f"{trade['ticker']} ${trade['strike']:.0f}{trade['type']}"
+        if key not in strike_activity:
+            strike_activity[key] = {'count': 0, 'total_premium': 0, 'total_volume': 0, 'buy_count': 0}
+        strike_activity[key]['count'] += 1
+        strike_activity[key]['total_premium'] += trade['premium']
+        strike_activity[key]['total_volume'] += trade['volume']
+        if 'BUY' in trade.get('enhanced_side', ''):
+            strike_activity[key]['buy_count'] += 1
+    
+    # Sort by total premium
+    top_strikes = sorted(strike_activity.items(), 
+                        key=lambda x: x[1]['total_premium'], reverse=True)[:8]
+    
+    if top_strikes:
+        st.markdown("**🎯 Most Active ETF Strikes by Premium:**")
+        col1, col2 = st.columns(2)
+        
+        for i, (strike_key, data) in enumerate(top_strikes):
+            col = col1 if i % 2 == 0 else col2
+            buy_ratio = data['buy_count'] / data['count'] if data['count'] > 0 else 0
+            sentiment_emoji = "🟢" if buy_ratio > 0.6 else "🔴" if buy_ratio < 0.4 else "⚪"
+            
+            with col:
+                st.write(f"**{strike_key}** {sentiment_emoji}")
+                st.write(f"💰 ${data['total_premium']:,.0f} | 📊 {data['total_volume']:,.0f} vol")
+                st.write(f"🔄 {data['count']} trades | {buy_ratio:.0%} buys")
+    
+    # 0DTE focus
+    zero_dte_trades = [t for t in trades if t['dte'] == 0]
+    if zero_dte_trades:
+        st.markdown("#### ⚡ 0DTE Spotlight")
+        zero_dte_premium = sum(t['premium'] for t in zero_dte_trades)
+        zero_dte_buys = len([t for t in zero_dte_trades if 'BUY' in t.get('enhanced_side', '')])
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("0DTE Total Premium", f"${zero_dte_premium:,.0f}")
+        with col2:
+            st.metric("0DTE Buy Trades", zero_dte_buys)
+        
+        # Top 0DTE trades
+        top_0dte = sorted(zero_dte_trades, key=lambda x: x['premium'], reverse=True)[:5]
+        st.markdown("**Top 0DTE Trades:**")
+        for i, trade in enumerate(top_0dte, 1):
+            enhanced_side = trade.get('enhanced_side', 'UNKNOWN')
+            confidence = trade.get('side_confidence', 0)
+            
+            if 'BUY' in enhanced_side:
+                side_indicator = "🟢"
+            elif 'SELL' in enhanced_side:
+                side_indicator = "🔴"
+            else:
+                side_indicator = "⚪"
+                
+            conf_indicator = "🟢" if confidence >= 0.7 else "🟡" if confidence >= 0.4 else "🔴"
+            
+            st.write(f"{i}. {side_indicator} {trade['ticker']} {trade['strike']:.0f}{trade['type']} - "
+                    f"${trade['premium']:,.0f} ({enhanced_side}) {conf_indicator}")
+
+def display_open_interest_analysis(trades):
+    st.markdown("### 📈 Open Interest Deep Dive")
+    
+    if not trades:
+        st.info("No data available")
+        return
+    
+    # OI Level Distribution
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("#### OI Level Summary")
+        oi_levels = {}
+        for trade in trades:
+            level = trade.get('oi_analysis', {}).get('oi_level', 'Unknown')
+            oi_levels[level] = oi_levels.get(level, 0) + 1
+        
+        for level, count in sorted(oi_levels.items()):
+            st.write(f"**{level}**: {count} trades")
+    
+    with col2:
+        st.markdown("#### Liquidity Analysis")
+        liquidity_scores = {}
+        for trade in trades:
+            score = trade.get('oi_analysis', {}).get('liquidity_score', 'Unknown')
+            liquidity_scores[score] = liquidity_scores.get(score, 0) + 1
+        
+        for score, count in sorted(liquidity_scores.items()):
+            st.write(f"**{score}**: {count} trades")
+    
+    # High OI Concentration Trades
+    st.markdown("#### 🎯 High OI Concentration Plays")
+    concentration_trades = [
+        t for t in trades 
+        if t.get('oi_analysis', {}).get('oi_concentration') == 'High Concentration'
+    ]
+    
+    if concentration_trades:
+        conc_data = []
+        for trade in sorted(concentration_trades, key=lambda x: x.get('premium', 0), reverse=True)[:10]:
+            enhanced_side = trade.get('enhanced_side', 'UNKNOWN')
+            confidence = trade.get('side_confidence', 0)
+            
+            side_display = f"🟢 {enhanced_side}" if 'BUY' in enhanced_side else f"🔴 {enhanced_side}" if 'SELL' in enhanced_side else f"⚪ {enhanced_side}"
+            
+            conc_data.append({
+                'Ticker': trade['ticker'],
+                'Strike': f"${trade['strike']:.0f}",
+                'Type': trade['type'],
+                'Side': side_display,
+                'Conf': f"{confidence:.0%}",
+                'Premium': f"${trade['premium']:,.0f}",
+                'OI': f"{trade['open_interest']:,}",
+                'Volume': f"{trade['volume']:,}",
+                'Primary Scenario': trade.get('scenarios', ['Normal Flow'])[0]
+            })
+        
+        st.dataframe(pd.DataFrame(conc_data), use_container_width=True)
+    else:
+        st.info("No high concentration plays found")
+
+def display_enhanced_alerts(trades):
+    alerts = generate_enhanced_alerts(trades)
+    if not alerts:
+        st.info("No high-priority alerts found")
+        return
+    
+    st.markdown("### 🚨 Enhanced Priority Alerts")
+    
+    # Alert summary
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Alerts", len(alerts))
+    with col2:
+        avg_score = np.mean([a.get('alert_score', 0) for a in alerts])
+        st.metric("Avg Alert Score", f"{avg_score:.1f}")
+    with col3:
+        high_conf_alerts = len([a for a in alerts if 'High Confidence' in a.get('enhanced_side', '')])
+        st.metric("High Conf Alerts", high_conf_alerts)
+    
+    for i, alert in enumerate(alerts[:15], 1):
+        with st.container():
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                enhanced_side = alert.get('enhanced_side', 'UNKNOWN')
+                confidence = alert.get('side_confidence', 0)
+                
+                if 'BUY' in enhanced_side:
+                    side_emoji = "🟢"
+                elif 'SELL' in enhanced_side:
+                    side_emoji = "🔴"
+                else:
+                    side_emoji = "⚪"
+                
+                conf_emoji = "🟢" if confidence >= 0.7 else "🟡" if confidence >= 0.4 else "🔴"
+                
+                st.markdown(f"**{i}. {side_emoji} {alert['ticker']} {alert['strike']:.0f}{alert['type']} "
+                            f"{alert['expiry']} ({alert['dte']}d) - {enhanced_side} {conf_emoji}**")
+                
+                oi_analysis = alert.get('oi_analysis', {})
+                st.write(f"💰 Premium: ${alert['premium']:,.0f} | Vol: {alert['volume']:,} | "
+                         f"OI: {alert['open_interest']:,} | Vol/OI: {alert['vol_oi_ratio']:.1f}")
+                st.write(f"📊 OI Level: {oi_analysis.get('oi_level', 'N/A')} | "
+                         f"Liquidity: {oi_analysis.get('liquidity_score', 'N/A')} | "
+                         f"IV: {alert['iv_percentage']} | Confidence: {confidence:.0%}")
+                st.write(f"🎯 Scenarios: {', '.join(alert.get('scenarios', [])[:3])}")
+                st.write(f"📍 Alert Reasons: {', '.join(alert.get('reasons', []))}")
+            with col2:
+                st.metric("Alert Score", alert.get('alert_score', 0))
+            st.divider()
+
+# --- NEW POSITION TRACKING DISPLAY FUNCTIONS ---
+def display_position_tracking_dashboard():
+    """Display position tracking dashboard"""
+    st.markdown("### 📊 High Confidence Position Tracking Dashboard")
+    
+    # Cleanup expired positions first
+    expired_count = position_tracker.cleanup_expired_positions()
+    if expired_count > 0:
+        st.info(f"🗑️ Cleaned up {expired_count} expired positions")
+    
+    # Get transfer analysis
+    analysis = position_tracker.analyze_position_transfers()
+    summary = analysis['summary']
+    
+    if summary['total_tracked'] == 0:
+        st.info("📍 No positions are currently being tracked. Run a scan to start tracking high confidence plays!")
+        return
+    
+    # Summary metrics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Tracked Positions", summary['total_tracked'])
+    
+    with col2:
+        st.metric("Transferred", summary['transferred'], 
+                 delta=f"{summary['transfer_rate']:.1%} rate")
+    
+    with col3:
+        st.metric("Buy Transfers", summary['buy_transfers'])
+    
+    with col4:
+        st.metric("Sell Transfers", summary['sell_transfers'])
+    
+    # Detailed analysis tabs
+    tab1, tab2, tab3 = st.tabs(["🔄 Active Transfers", "📊 All Tracked Positions", "📈 Transfer Analytics"])
+    
+    with tab1:
+        st.markdown("#### 🔄 Positions with Follow-up Activity")
+        transferred_positions = analysis['transferred']
+        
+        if not transferred_positions:
+            st.info("No transferred positions found yet")
+        else:
+            for position in transferred_positions:
+                with st.expander(f"📍 {position['ticker']} ${position['strike']:.0f}{position['type']} - {position['expiry']}"):
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.markdown("**Original Trade:**")
+                        st.write(f"💰 Premium: ${position['original_premium']:,.0f}")
+                        st.write(f"📊 Volume: {position['original_volume']:,}")
+                        st.write(f"🎯 Side: {position['original_side']}")
+                        st.write(f"📅 Date: {position['original_date']}")
+                        st.write(f"⏱️ DTE: {position['dte']} days")
+                    
+                    with col2:
+                        st.markdown("**Follow-up Activity:**")
+                        for i, follow_up in enumerate(position['follow_up_data'], 1):
+                            st.write(f"**Day {i} ({follow_up['date']}):**")
+                            st.write(f"💰 Premium: ${follow_up['total_premium']:,.0f}")
+                            st.write(f"📊 Volume: {follow_up['total_volume']:,} ({follow_up['volume_vs_original']:.1f}x original)")
+                            st.write(f"🎯 Dominant Side: {follow_up['dominant_side']}")
+                            st.write(f"🔄 Trades: {follow_up['trade_count']} ({follow_up['buy_count']} buys, {follow_up['sell_count']} sells)")
+                            st.write(f"🎯 Avg Confidence: {follow_up['avg_confidence']:.1%}")
+                            st.write("---")
+    
+    with tab2:
+        st.markdown("#### 📊 All Tracked Positions")
+        
+        if 'tracked_positions' in st.session_state and st.session_state.tracked_positions:
+            positions_data = []
+            
+            for position_id, position in st.session_state.tracked_positions.items():
+                follow_up_count = len(position['follow_up_data'])
+                total_follow_up_volume = sum(f['total_volume'] for f in position['follow_up_data'])
+                total_follow_up_premium = sum(f['total_premium'] for f in position['follow_up_data'])
+                
+                # Determine status
+                if follow_up_count > 0:
+                    latest_activity = position['follow_up_data'][-1]
+                    status = f"✅ {follow_up_count} days activity"
+                    dominant_side = latest_activity['dominant_side']
+                else:
+                    status = "⏳ No follow-up"
+                    dominant_side = "N/A"
+                
+                positions_data.append({
+                    'Ticker': position['ticker'],
+                    'Strike': f"${position['strike']:.0f}",
+                    'Type': position['type'],
+                    'Expiry': position['expiry'],
+                    'DTE': position['dte'],
+                    'Original Date': position['original_date'],
+                    'Original Premium': f"${position['original_premium']:,.0f}",
+                    'Original Volume': f"{position['original_volume']:,}",
+                    'Status': status,
+                    'Follow-up Days': follow_up_count,
+                    'Total Follow Volume': f"{total_follow_up_volume:,}",
+                    'Total Follow Premium': f"${total_follow_up_premium:,.0f}",
+                    'Latest Side': dominant_side,
+                    'Position ID': position_id[:8]
+                })
+            
+            df = pd.DataFrame(positions_data)
+            st.dataframe(df, use_container_width=True)
+            
+            # Bulk actions
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                if st.button("🗑️ Clear Expired Positions"):
+                    expired_count = position_tracker.cleanup_expired_positions()
+                    st.success(f"Cleaned up {expired_count} expired positions")
+                    st.rerun()
+            
+            with col2:
+                if st.button("📥 Export Tracking Data"):
+                    csv = df.to_csv(index=False)
+                    st.download_button(
+                        label="Download CSV",
+                        data=csv,
+                        file_name=f"position_tracking_{datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv"
+                    )
+            
+            with col3:
+                if st.button("🔄 Refresh Analysis"):
+                    st.rerun()
+        
+        else:
+            st.info("No positions being tracked yet")
+    
+    with tab3:
+        st.markdown("#### 📈 Transfer Analytics")
+        
+        if summary['total_tracked'] > 0:
+            # Transfer rate analysis
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**📊 Transfer Statistics:**")
+                st.write(f"• **Overall Transfer Rate**: {summary['transfer_rate']:.1%}")
+                st.write(f"• **Buy-side Transfers**: {summary['buy_transfers']} positions")
+                st.write(f"• **Sell-side Transfers**: {summary['sell_transfers']} positions")
+                st.write(f"• **Average Tracking Days**: {summary['avg_days_tracked']:.1f}")
+            
+            with col2:
+                st.markdown("**🎯 Key Insights:**")
+                if summary['transfer_rate'] > 0.5:
+                    st.write("• 🟢 High transfer rate - good follow-through")
+                elif summary['transfer_rate'] > 0.3:
+                    st.write("• 🟡 Moderate transfer rate")
+                else:
+                    st.write("• 🔴 Low transfer rate - positions not following through")
+                
+                if summary['buy_transfers'] > summary['sell_transfers']:
+                    st.write("• 📈 More continued buying than selling")
+                elif summary['sell_transfers'] > summary['buy_transfers']:
+                    st.write("• 📉 More selling than continued buying")
+                else:
+                    st.write("• ⚖️ Balanced buy/sell follow-through")
+            
+            # Detailed breakdown by ticker
+            if 'tracked_positions' in st.session_state:
+                ticker_analysis = defaultdict(lambda: {'total': 0, 'transferred': 0})
+                
+                for position in st.session_state.tracked_positions.values():
+                    ticker = position['ticker']
+                    ticker_analysis[ticker]['total'] += 1
+                    if position['follow_up_data']:
+                        ticker_analysis[ticker]['transferred'] += 1
+                
+                st.markdown("**📊 Transfer Rates by Ticker:**")
+                ticker_data = []
+                for ticker, data in ticker_analysis.items():
+                    transfer_rate = data['transferred'] / data['total'] if data['total'] > 0 else 0
+                    ticker_data.append({
+                        'Ticker': ticker,
+                        'Total Tracked': data['total'],
+                        'Transferred': data['transferred'],
+                        'Transfer Rate': f"{transfer_rate:.1%}"
+                    })
+                
+                ticker_df = pd.DataFrame(ticker_data).sort_values('Transfer Rate', ascending=False)
+                st.dataframe(ticker_df, use_container_width=True)
 
 def display_enhanced_scan_with_tracking(trades):
-    """Enhanced scan results with advanced position tracking"""
+    """Enhanced scan results with position tracking integration"""
     
     # Save trackable positions from current scan
     trackable_trades = position_tracker.save_trackable_positions(trades)
     
     if trackable_trades:
-        st.success(f"📍 Added {len(trackable_trades)} high-confidence positions to enhanced tracking system")
+        st.success(f"📍 Added {len(trackable_trades)} high confidence positions to tracking system")
         
-        # Enhanced tracking preview
-        with st.expander("📍 Newly Tracked Positions with Predictions", expanded=False):
+        # Show what's being tracked
+        with st.expander("📍 Newly Tracked Positions", expanded=False):
             tracking_data = []
             for trade in trackable_trades:
                 tracking_data.append({
@@ -2779,544 +2400,445 @@ def display_enhanced_scan_with_tracking(trades):
                     'Volume': f"{trade['volume']:,}",
                     'Side': trade['enhanced_side'],
                     'Confidence': f"{trade['side_confidence']:.1%}",
-                    'Alert Score': f"{trade.get('enhanced_alert_score', 0):.1f}",
-                    'Expected Outcome': position_tracker.predict_outcome(trade),
-                    'Tracking Reason': position_tracker.get_tracking_reason(trade)
+                    'Primary Scenario': trade.get('scenarios', ['N/A'])[0]
                 })
             
             df = pd.DataFrame(tracking_data)
             st.dataframe(df, use_container_width=True)
     
-    # Check for updates to existing tracked positions with enhanced analysis
+    # Check for updates to existing tracked positions
     position_updates = position_tracker.check_position_updates(trades)
     
     if position_updates:
         st.warning(f"🔄 Found activity in {len(position_updates)} previously tracked positions!")
         
-        with st.expander("🔄 Enhanced Position Updates", expanded=True):
+        with st.expander("🔄 Position Updates", expanded=True):
             for update in position_updates:
                 position = update['position']
                 activity = update['current_activity']
-                is_significant = update['is_significant']
                 
-                # Enhanced display with momentum analysis
-                significance_emoji = "💪" if is_significant else "📊"
-                st.markdown(f"**{significance_emoji} {position['ticker']} ${position['strike']:.0f}{position['type']} - {position['expiry']}**")
+                st.markdown(f"**📍 {position['ticker']} ${position['strike']:.0f}{position['type']} - {position['expiry']}**")
                 
-                col1, col2, col3, col4 = st.columns(4)
-                
+                col1, col2, col3 = st.columns(3)
                 with col1:
                     st.write(f"**Original (Day 1):**")
                     st.write(f"Premium: ${position['original_premium']:,.0f}")
                     st.write(f"Volume: {position['original_volume']:,}")
                     st.write(f"Side: {position['original_side']}")
-                    st.write(f"Expected: {position.get('expected_outcome', 'Unknown')}")
                 
                 with col2:
                     st.write(f"**Today's Activity:**")
                     st.write(f"Premium: ${activity['total_premium']:,.0f}")
                     st.write(f"Volume: {activity['total_volume']:,}")
                     st.write(f"Side: {activity['dominant_side']}")
-                    st.write(f"Trades: {activity['trade_count']}")
                 
                 with col3:
-                    st.write(f"**Enhanced Analysis:**")
                     volume_multiple = activity['volume_vs_original']
+                    st.write(f"**Analysis:**")
                     st.write(f"Volume Multiple: {volume_multiple:.1f}x")
-                    st.write(f"Sentiment: {activity['sentiment_shift']}")
-                    st.write(f"Momentum Score: {activity['momentum_score']:.0f}/100")
+                    st.write(f"Trades: {activity['trade_count']}")
                     st.write(f"Avg Confidence: {activity['avg_confidence']:.1%}")
                 
-                with col4:
-                    st.write(f"**Market Context:**")
-                    original_context = position.get('market_context_at_entry', {})
-                    current_context = get_market_context()
-                    
-                    original_sentiment = original_context.get('market_sentiment', 'Unknown')
-                    current_sentiment = current_context.get('market_sentiment', 'Unknown')
-                    
-                    st.write(f"Entry Sentiment: {original_sentiment}")
-                    st.write(f"Current Sentiment: {current_sentiment}")
-                    
-                    if original_sentiment != current_sentiment:
-                        st.write("⚠️ Sentiment Shift!")
-                
-                # Enhanced interpretation
-                if activity['momentum_score'] > 70:
-                    st.success("🚀 **Strong Momentum**: High probability of continued interest")
-                elif activity['momentum_score'] > 40:
-                    st.info("📈 **Moderate Momentum**: Decent follow-through")
-                elif activity['sentiment_shift'] == "Shifted to Selling":
-                    st.warning("⚠️ **Sentiment Reversal**: Original buyers may be taking profits")
-                else:
-                    st.info("📊 **Standard Activity**: Normal follow-through pattern")
+                if volume_multiple > 1.5:
+                    st.success("💪 Strong continued interest!")
+                elif activity['dominant_side'] != 'BUY':
+                    st.warning("⚠️ Shift from buying to selling")
                 
                 st.divider()
 
-def display_position_tracking_dashboard():
-    """Enhanced position tracking dashboard with advanced analytics"""
-    st.markdown("### 📍 Enhanced Position Tracking Dashboard")
-    
-    # Cleanup expired positions first
-    expired_count = position_tracker.cleanup_expired_positions()
-    if expired_count > 0:
-        st.info(f"🗑️ Cleaned up {expired_count} expired positions")
-    
-    # Get enhanced transfer analysis
-    analysis = position_tracker.analyze_position_transfers()
-    summary = analysis['summary']
-    
-    if summary['total_tracked'] == 0:
-        st.info("📍 No positions currently tracked. Run a scan to start tracking high-confidence plays!")
+# --- CSV EXPORT ---
+def save_to_csv(trades, filename_prefix):
+    if not trades:
+        st.warning("No data to save")
         return
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{filename_prefix}_{timestamp}.csv"
+    csv_data = []
+    for trade in trades:
+        row = trade.copy()
+        if isinstance(row.get('reasons'), list):
+            row['reasons'] = ', '.join(row['reasons'])
+        if isinstance(row.get('scenarios'), list):
+            row['scenarios'] = ', '.join(row['scenarios'])
+        if isinstance(row.get('side_reasoning'), list):
+            row['side_reasoning'] = ', '.join(row['side_reasoning'])
+        if isinstance(row.get('oi_analysis'), dict):
+            oi_analysis = row['oi_analysis']
+            row['oi_level'] = oi_analysis.get('oi_level', '')
+            row['liquidity_score'] = oi_analysis.get('liquidity_score', '')
+            row['oi_change_indicator'] = oi_analysis.get('oi_change_indicator', '')
+            del row['oi_analysis']
+        csv_data.append(row)
+    df = pd.DataFrame(csv_data)
+    csv = df.to_csv(index=False)
+    st.download_button(
+        label=f"📥 Download {filename}",
+        data=csv,
+        file_name=filename,
+        mime="text/csv",
+        use_container_width=True
+    )
+
+# --- STREAMLIT UI ---
+st.set_page_config(page_title="Enhanced Options Flow Tracker with Position Tracking", page_icon="📊", layout="wide")
+st.title("📊 Enhanced Options Flow Tracker with Position Tracking")
+st.markdown("### Real-time unusual options activity with Enhanced Buy/Sell Detection and Position Transfer Tracking")
+
+with st.sidebar:
+    st.markdown("## 🎛️ Control Panel")
+    scan_type = st.selectbox(
+        "Select Analysis Type:",
+        [
+            "🔍 Main Flow Analysis",
+            "📍 Position Tracking Dashboard",  # NEW
+            "📈 Open Interest Deep Dive", 
+            "🔄 Enhanced Buy/Sell Analysis",
+            "🚨 Enhanced Alert System",
+            "⚡ ETF Flow Scanner",
+            "🎯 Pattern Recognition"
+        ]
+    )
     
-    # Enhanced summary metrics with context
-    col1, col2, col3, col4, col5 = st.columns(5)
+    # Show tracking status
+    if 'tracked_positions' in st.session_state:
+        tracked_count = len(st.session_state.tracked_positions)
+        active_count = len([p for p in st.session_state.tracked_positions.values() 
+                          if p['tracking_status'] == 'Active'])
+        st.markdown("### 📍 Tracking Status")
+        st.metric("Active Positions", active_count)
+        st.metric("Total Tracked", tracked_count)
     
+    # Premium Range Filter
+    st.markdown("### 💰 Premium Range Filter")
+    premium_range = st.selectbox(
+        "Select Premium Range:",
+        [
+            "All Premiums (No Filter)",
+            "Under $100K",
+            "Under $250K", 
+            "$100K - $250K",
+            "$250K - $500K",
+            "Above $250K",
+            "Above $500K",
+            "Above $1M"
+        ],
+        index=0
+    )
+    
+    # DTE Filter
+    st.markdown("### 📅 Time to Expiry Filter")
+    dte_filter = st.selectbox(
+        "Select DTE Range:",
+        [
+            "All DTE",
+            "0DTE Only",
+            "Weekly (≤7d)",
+            "Monthly (≤30d)",
+            "Quarterly (≤90d)",
+            "LEAPS (>90d)"
+        ],
+        index=0
+    )
+    
+    # Enhanced Trade Side Filter
+    st.markdown("### 🔄 Trade Side Filter")
+    side_filter = st.selectbox(
+        "Filter by Trade Side:",
+        [
+            "All Trades",
+            "Buy Only",
+            "Sell Only", 
+            "High Confidence Only",
+            "Medium+ Confidence"
+        ],
+        index=0
+    )
+    
+    # Debug Mode
+    st.markdown("### 🔧 Debug Options")
+    debug_mode = st.checkbox("Enable Diagnostics", help="Show data quality diagnostics")
+    
+    # Quick Filter Buttons
+    st.markdown("### ⚡ Quick Filters")
+    col1, col2 = st.columns(2)
     with col1:
-        st.metric("Total Tracked", summary['total_tracked'])
-    
+        if st.button("🔥 Mega Trades", use_container_width=True):
+            premium_range = "Above $1M"
+            st.rerun()
     with col2:
-        transfer_rate = summary['transfer_rate']
-        rate_emoji = "🟢" if transfer_rate > 0.5 else "🟡" if transfer_rate > 0.3 else "🔴"
-        st.metric("Transfer Rate", f"{rate_emoji} {transfer_rate:.1%}")
+        if st.button("⚡ 0DTE Plays", use_container_width=True):
+            dte_filter = "0DTE Only"
+            st.rerun()
     
-    with col3:
-        st.metric("Active Transfers", summary['transferred'])
+    # Additional quick filters
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🎯 High Conf", use_container_width=True):
+            side_filter = "High Confidence Only"
+            st.rerun()
+    with col2:
+        if st.button("🟢 Buys Only", use_container_width=True):
+            side_filter = "Buy Only"
+            st.rerun()
     
-    with col4:
-        buy_sell_ratio = summary['buy_transfers'] / max(summary['sell_transfers'], 1)
-        ratio_emoji = "🟢" if buy_sell_ratio > 1.5 else "🔴" if buy_sell_ratio < 0.7 else "⚪"
-        st.metric("Buy/Sell Transfers", f"{ratio_emoji} {summary['buy_transfers']}/{summary['sell_transfers']}")
-    
-    with col5:
-        avg_days = summary.get('avg_days_tracked', 0)
-        st.metric("Avg Days Tracked", f"{avg_days:.1f}")
-    
-    # Performance integration
-    performance_summary = performance_tracker.get_performance_summary()
-    
-    if performance_summary.get('total_trades_tracked', 0) > 0:
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            theoretical_pnl = performance_summary.get('total_theoretical_pnl', 0)
-            pnl_emoji = "🟢" if theoretical_pnl > 0 else "🔴" if theoretical_pnl < 0 else "⚪"
-            st.metric("Theoretical P&L", f"{pnl_emoji} ${theoretical_pnl:,.0f}")
-        
-        with col2:
-            win_rate = performance_summary.get('win_rate', 0)
-            st.metric("Estimated Win Rate", f"{win_rate:.1%}")
-        
-        with col3:
-            avg_pnl = performance_summary.get('avg_pnl_per_trade', 0)
-            st.metric("Avg P&L/Trade", f"${avg_pnl:,.0f}")
-    
-    # Enhanced tabs with new features
-    tab1, tab2, tab3, tab4 = st.tabs(["🔄 Active Transfers", "📊 All Positions", "📈 Analytics", "🎯 Predictions"])
-    
-    with tab1:
-        st.markdown("#### 🔄 Positions with Follow-up Activity")
-        transferred_positions = analysis['transferred']
-        
-        if not transferred_positions:
-            st.info("No transferred positions found yet")
-        else:
-            for position in transferred_positions:
-                with st.expander(f"📍 {position['ticker']} ${position['strike']:.0f}{position['type']} - {position['expiry']}"):
-                    col1, col2, col3 = st.columns(3)
-                    
-                    with col1:
-                        st.markdown("**Original Trade:**")
-                        st.write(f"💰 Premium: ${position['original_premium']:,.0f}")
-                        st.write(f"📊 Volume: {position['original_volume']:,}")
-                        st.write(f"🎯 Side: {position['original_side']}")
-                        st.write(f"📅 Date: {position['original_date']}")
-                        st.write(f"⏱️ DTE: {position['dte']} days")
-                        st.write(f"🔮 Expected: {position.get('expected_outcome', 'Unknown')}")
-                    
-                    with col2:
-                        st.markdown("**Follow-up Summary:**")
-                        total_follow_premium = sum(f['total_premium'] for f in position['follow_up_data'])
-                        total_follow_volume = sum(f['total_volume'] for f in position['follow_up_data'])
-                        
-                        st.write(f"💰 Total Follow Premium: ${total_follow_premium:,.0f}")
-                        st.write(f"📊 Total Follow Volume: {total_follow_volume:,}")
-                        st.write(f"📈 Days Active: {len(position['follow_up_data'])}")
-                        
-                        # Calculate overall momentum
-                        if position['follow_up_data']:
-                            latest = position['follow_up_data'][-1]
-                            overall_momentum = latest.get('momentum_score', 0)
-                            momentum_emoji = "🚀" if overall_momentum > 70 else "📈" if overall_momentum > 40 else "📊"
-                            st.write(f"🎯 Overall Momentum: {momentum_emoji} {overall_momentum:.0f}/100")
-                    
-                    with col3:
-                        st.markdown("**Day-by-Day Activity:**")
-                        for i, follow_up in enumerate(position['follow_up_data'], 1):
-                            sentiment_emoji = "🟢" if follow_up['sentiment_shift'] == 'Continued Buying' else "🔴" if 'Selling' in follow_up['sentiment_shift'] else "⚪"
-                            st.write(f"**Day {i} ({follow_up['date']}):** {sentiment_emoji}")
-                            st.write(f"  Premium: ${follow_up['total_premium']:,.0f}")
-                            st.write(f"  Volume: {follow_up['total_volume']:,} ({follow_up['volume_vs_original']:.1f}x)")
-                            st.write(f"  Momentum: {follow_up['momentum_score']:.0f}/100")
-                            if i < len(position['follow_up_data']):
-                                st.write("  ---")
-    
-    with tab2:
-        st.markdown("#### 📊 All Tracked Positions")
-        
-        if 'tracked_positions' in st.session_state and st.session_state.tracked_positions:
-            positions_data = []
+    run_scan = st.button("🔄 Run Enhanced Scan", type="primary", use_container_width=True)
+
+# Main execution logic
+if scan_type == "📍 Position Tracking Dashboard":
+    display_position_tracking_dashboard()
+
+elif run_scan:
+    with st.spinner(f"Running {scan_type}..."):
+        if "ETF Flow Scanner" in scan_type:
+            # ETF scanner uses its own data fetch
+            trades = fetch_etf_trades()
+            # Apply filters to ETF trades
+            original_count = len(trades)
+            trades = apply_premium_filter(trades, premium_range)
+            trades = apply_dte_filter(trades, dte_filter)
+            trades = apply_trade_side_filter(trades, side_filter)
             
-            for position_id, position in st.session_state.tracked_positions.items():
-                follow_up_count = len(position['follow_up_data'])
-                
-                # Enhanced calculations
-                total_follow_up_volume = sum(f['total_volume'] for f in position['follow_up_data'])
-                total_follow_up_premium = sum(f['total_premium'] for f in position['follow_up_data'])
-                
-                # Status determination
-                if follow_up_count > 0:
-                    latest_activity = position['follow_up_data'][-1]
-                    momentum_score = latest_activity.get('momentum_score', 0)
-                    
-                    if momentum_score > 70:
-                        status = "🚀 Strong Transfer"
-                    elif momentum_score > 40:
-                        status = "📈 Moderate Transfer"  
-                    else:
-                        status = "📊 Weak Transfer"
-                        
-                    dominant_side = latest_activity['dominant_side']
-                    sentiment_shift = latest_activity['sentiment_shift']
-                else:
-                    status = "⏳ No Follow-up"
-                    dominant_side = "N/A"
-                    sentiment_shift = "N/A"
-                
-                # Calculate days since entry
-                days_since = (datetime.now() - datetime.strptime(position['original_date'], '%Y-%m-%d')).days
-                theoretical_pnl = performance_tracker.calculate_theoretical_pnl(position, days_since)
-                
-                positions_data.append({
-                    'Ticker': position['ticker'],
-                    'Strike': f"${position['strike']:.0f}",
-                    'Type': position['type'],
-                    'Expiry': position['expiry'],
-                    'DTE': position['dte'],
-                    'Entry Date': position['original_date'],
-                    'Days Held': days_since,
-                    'Original Premium': f"${position['original_premium']:,.0f}",
-                    'Original Volume': f"{position['original_volume']:,}",
-                    'Expected Outcome': position.get('expected_outcome', 'Unknown'),
-                    'Status': status,
-                    'Follow-up Days': follow_up_count,
-                    'Total Follow Volume': f"{total_follow_up_volume:,}",
-                    'Total Follow Premium': f"${total_follow_up_premium:,.0f}",
-                    'Latest Side': dominant_side,
-                    'Sentiment Shift': sentiment_shift,
-                    'Theoretical P&L': f"${theoretical_pnl:,.0f}",
-                    'Tracking Reason': position.get('tracking_reason', 'High Confidence'),
-                    'Position ID': position_id[:8]
-                })
+            # Show filter results
+            if len(trades) != original_count:
+                st.info(f"**Filter Results:** {original_count} → {len(trades)} ETF trades after applying filters")
             
-            df = pd.DataFrame(positions_data)
-            st.dataframe(df, use_container_width=True)
+            # Debug diagnostics
+            if debug_mode and trades:
+                diagnose_trade_data(trades)
             
-            # Enhanced bulk actions
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                if st.button("🗑️ Clear Expired"):
-                    expired_count = position_tracker.cleanup_expired_positions()
-                    st.success(f"Cleaned up {expired_count} expired positions")
-                    st.rerun()
-            
-            with col2:
-                if st.button("📊 Export Enhanced Data"):
-                    # Create enhanced export with all tracking data
-                    enhanced_csv = df.to_csv(index=False)
-                    st.download_button(
-                        label="Download Enhanced CSV",
-                        data=enhanced_csv,
-                        file_name=f"enhanced_position_tracking_{datetime.now().strftime('%Y%m%d')}.csv",
-                        mime="text/csv"
-                    )
-            
-            with col3:
-                if st.button("📈 Performance Summary"):
-                    performance_summary = performance_tracker.get_performance_summary()
-                    backtest_results = backtest_engine.validate_prediction_accuracy()
-                    
-                    summary_report = {
-                        'timestamp': datetime.now().isoformat(),
-                        'total_positions': len(positions_data),
-                        'performance_metrics': performance_summary,
-                        'backtest_results': backtest_results,
-                        'position_breakdown': positions_data
-                    }
-                    
-                    st.download_button(
-                        label="Download Performance Report",
-                        data=json.dumps(summary_report, indent=2, default=str),
-                        file_name=f"performance_summary_{datetime.now().strftime('%Y%m%d')}.json",
-                        mime="application/json"
-                    )
-            
-            with col4:
-                if st.button("🔄 Refresh Analysis"):
-                    st.rerun()
-        else:
-            st.info("No positions being tracked yet")
-    
-    with tab3:
-        st.markdown("#### 📈 Enhanced Transfer Analytics")
-        
-        if summary['total_tracked'] > 0:
-            # Performance integration
-            performance_data = performance_tracker.get_performance_summary()
-            backtest_results = backtest_engine.validate_prediction_accuracy()
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("**📊 Transfer Performance:**")
-                st.write(f"• **Overall Transfer Rate**: {summary['transfer_rate']:.1%}")
-                st.write(f"• **Buy-side Transfers**: {summary['buy_transfers']} positions")
-                st.write(f"• **Sell-side Transfers**: {summary['sell_transfers']} positions")
-                st.write(f"• **Average Days Tracked**: {summary.get('avg_days_tracked', 0):.1f}")
-                
-                if performance_data.get('total_trades_tracked', 0) > 0:
-                    st.write(f"• **Estimated Win Rate**: {performance_data.get('win_rate', 0):.1%}")
-                    st.write(f"• **Avg Theoretical P&L**: ${performance_data.get('avg_pnl_per_trade', 0):,.0f}")
-            
-            with col2:
-                st.markdown("**💡 Advanced Insights:**")
-                
-                transfer_rate = summary['transfer_rate']
-                if transfer_rate > 0.6:
-                    st.success("• 🟢 Excellent transfer rate - strong detection accuracy")
-                elif transfer_rate > 0.4:
-                    st.info("• 🟡 Good transfer rate - decent follow-through")
-                else:
-                    st.warning("• 🔴 Low transfer rate - consider adjusting criteria")
-                
-                buy_sell_ratio = summary['buy_transfers'] / max(summary['sell_transfers'], 1)
-                if buy_sell_ratio > 1.5:
-                    st.success("• 📈 Strong continued buying momentum")
-                elif buy_sell_ratio < 0.7:
-                    st.warning("• 📉 More selling than continued buying")
-                else:
-                    st.info("• ⚖️ Balanced buy/sell follow-through")
-                
-                if backtest_results:
-                    confidence_analysis = backtest_results['confidence_analysis']
-                    high_conf_rate = confidence_analysis.get('high_confidence_rate', 0)
-                    
-                    if high_conf_rate > 0.7:
-                        st.success("• 🎯 High confidence trades performing excellently")
-                    elif high_conf_rate > 0.5:
-                        st.info("• 🎯 High confidence trades performing well")
-                    else:
-                        st.warning("• 🎯 High confidence trades underperforming")
-            
-            # Scenario effectiveness from backtesting
-            if backtest_results and backtest_results.get('scenario_effectiveness'):
-                st.markdown("**🎯 Best Performing Scenarios:**")
-                scenario_effectiveness = backtest_results['scenario_effectiveness']
-                
-                # Show top 5 scenarios
-                top_scenarios = sorted(scenario_effectiveness.items(), key=lambda x: -x[1])[:5]
-                
-                for scenario, rate in top_scenarios:
-                    rate_emoji = "🟢" if rate > 0.6 else "🟡" if rate > 0.4 else "🔴"
-                    st.write(f"• {rate_emoji} **{scenario}**: {rate:.1%} transfer rate")
-        
-        else:
-            st.info("No tracking data available yet")
-    
-    with tab4:
-        st.markdown("#### 🎯 Prediction Analysis")
-        
-        if 'tracked_positions' in st.session_state and st.session_state.tracked_positions:
-            # Prediction accuracy analysis
-            positions = st.session_state.tracked_positions.values()
-            
-            prediction_analysis = {
-                'High Transfer Probability': {'predicted': 0, 'actual': 0},
-                'Medium Transfer Probability': {'predicted': 0, 'actual': 0}, 
-                'Low Transfer Probability': {'predicted': 0, 'actual': 0}
-            }
-            
-            for position in positions:
-                expected = position.get('expected_outcome', 'Unknown')
-                if expected in prediction_analysis:
-                    prediction_analysis[expected]['predicted'] += 1
-                    
-                    # Check if it actually transferred
-                    if len(position.get('follow_up_data', [])) > 0:
-                        prediction_analysis[expected]['actual'] += 1
-            
-            st.markdown("**🔮 Prediction Accuracy:**")
-            
-            for prediction, data in prediction_analysis.items():
-                if data['predicted'] > 0:
-                    accuracy = data['actual'] / data['predicted']
-                    accuracy_emoji = "🟢" if accuracy > 0.6 else "🟡" if accuracy > 0.4 else "🔴"
-                    
-                    st.write(f"• {accuracy_emoji} **{prediction}**: {accuracy:.1%} accuracy "
-                            f"({data['actual']}/{data['predicted']} transferred)")
-            
-            # Model improvement suggestions
-            st.markdown("**🔧 Model Improvement Suggestions:**")
-            
-            overall_accuracy = sum(d['actual'] for d in prediction_analysis.values()) / max(sum(d['predicted'] for d in prediction_analysis.values()), 1)
-            
-            if overall_accuracy < 0.5:
-                st.warning("• 🎯 Consider adjusting prediction criteria - accuracy below 50%")
-                st.info("• 💡 Try increasing minimum confidence threshold")
-                st.info("• 💡 Focus on fewer, higher-quality predictions")
-            elif overall_accuracy > 0.7:
-                st.success("• 🎯 Excellent prediction accuracy! Model is well-calibrated")
+            if not trades:
+                st.warning("⚠️ No ETF trades match your current filters. Try adjusting the filters.")
             else:
-                st.info("• 🎯 Good prediction accuracy - minor tweaks could improve")
-        
+                # Enhanced scan with tracking integration
+                display_enhanced_scan_with_tracking(trades)
+                display_etf_scanner(trades)
+                with st.expander("💾 Export Data", expanded=False):
+                    save_to_csv(trades, "enhanced_etf_flow_scanner")
         else:
-            st.info("No prediction data available yet")
+            # Regular analysis types use general flow data
+            trades = fetch_general_flow()
+            
+            # Apply filters
+            original_count = len(trades)
+            trades = apply_premium_filter(trades, premium_range)
+            trades = apply_dte_filter(trades, dte_filter)
+            trades = apply_trade_side_filter(trades, side_filter)
+            
+            # Show filter results
+            if len(trades) != original_count:
+                st.info(f"**Filter Results:** {original_count} → {len(trades)} trades after applying filters")
+            
+            # Debug diagnostics
+            if debug_mode and trades:
+                diagnose_trade_data(trades)
+            
+            if not trades:
+                st.warning("⚠️ No trades match your current filters. Try adjusting the filters.")
+            else:
+                # Enhanced scan with tracking integration
+                display_enhanced_scan_with_tracking(trades)
+                
+                # Display enhanced summary for all scan types
+                display_enhanced_summary(trades)
+                
+                if "Main Flow" in scan_type:
+                    display_main_trades_table(trades)
+                    with st.expander("💾 Export Data", expanded=False):
+                        save_to_csv(trades, "enhanced_main_flow")
+
+                elif "Open Interest" in scan_type:
+                    display_open_interest_analysis(trades)
+                    display_main_trades_table(trades, "📋 OI-Focused Trade Analysis")
+                    with st.expander("💾 Export Data", expanded=False):
+                        save_to_csv(trades, "enhanced_oi_analysis")
+
+                elif "Buy/Sell" in scan_type:
+                    display_enhanced_buy_sell_analysis(trades)
+                    with st.expander("💾 Export Data", expanded=False):
+                        save_to_csv(trades, "enhanced_buy_sell_flow")
+
+                elif "Alert" in scan_type:
+                    display_enhanced_alerts(trades)
+                    with st.expander("💾 Export Data", expanded=False):
+                        save_to_csv(trades, "enhanced_priority_alerts")
+                
+                elif "Pattern Recognition" in scan_type:
+                    display_pattern_recognition_analysis(trades)
+                    display_main_trades_table(trades, "📋 Pattern-Based Trade Analysis")
+                    with st.expander("💾 Export Data", expanded=False):
+                        save_to_csv(trades, "enhanced_pattern_analysis")
+
+else:
+    st.markdown("""
+    ## Welcome to the Enhanced Options Flow Tracker with Position Tracking! 👋
+    
+    ### 🆕 **NEW: Position Transfer Tracking System**
+    
+    #### 📍 **What Gets Tracked:**
+    - **High confidence BUY positions** (70%+ confidence)
+    - **Significant premium** ($200K+ threshold)
+    - **All option types** and expirations
+    - **Automatic position ID** generation for precise tracking
+    
+    #### 🔄 **How Transfer Detection Works:**
+    1. **Scan Detection**: High confidence plays automatically saved to tracking system
+    2. **Daily Monitoring**: Each new scan checks for activity in tracked positions  
+    3. **Transfer Analysis**: Identifies continued buying, selling, or mixed activity
+    4. **Pattern Recognition**: Analyzes volume multiples and sentiment shifts
+    
+    #### 📊 **Position Tracking Dashboard Features:**
+    - **Transfer Rate Metrics**: See what % of positions have follow-up activity
+    - **Buy vs Sell Analysis**: Track if positions continue buying or shift to selling
+    - **Volume Analysis**: Compare follow-up volume to original activity
+    - **Ticker-level Insights**: Which stocks/ETFs have best follow-through rates
+    
+    #### 🎯 **Key Tracking Insights:**
+    - **✅ Transferred Positions**: Had follow-up activity (continued interest)
+    - **⏳ No Follow-up**: High confidence plays that didn't transfer
+    - **📈 Volume Multiples**: How much additional volume came in
+    - **🔄 Sentiment Shifts**: Did buying continue or shift to selling?
+    
+    #### 💡 **Use Cases:**
+    1. **Validate Edge**: See if your high confidence detection actually predicts follow-up flow
+    2. **Pattern Learning**: Identify which types of plays have best transfer rates  
+    3. **Risk Management**: Monitor if large positions attract continued buying or selling
+    4. **Market Sentiment**: Track if institutional-sized plays influence follow-up activity
+    
+    #### 🔧 **Getting Started:**
+    1. **Run any scan** to automatically start tracking high confidence positions
+    2. **Check "Position Tracking Dashboard"** to see current tracking status
+    3. **Run daily scans** to detect transfer activity
+    4. **Analyze patterns** in the Transfer Analytics tab
+    
+    ### 🚀 **Enhanced Features:**
+    - **Automatic cleanup** of expired positions
+    - **CSV export** of tracking data
+    - **Real-time alerts** when tracked positions show activity
+    - **Confidence scoring** for transfer predictions
+    - **Bulk position management** tools
+    
+    ### 🔍 **Enhanced Buy/Sell Detection System:**
+    
+    #### 🎯 **Multi-Method Analysis** (6+ detection methods):
+    1. **Bid/Ask Price Analysis** - Most reliable when available
+    2. **Volume/OI Ratio Analysis** - Identifies new position building
+    3. **Description Keyword Analysis** - Parses trade descriptions
+    4. **Rule Pattern Analysis** - Uses ascending/descending patterns
+    5. **Option Moneyness Analysis** - OTM calls typically bought
+    6. **Time-based Analysis** - Market timing patterns
+    
+    #### 📊 **Confidence Scoring:**
+    - **🟢 High Confidence (70%+)**: Multiple signals align
+    - **🟡 Medium Confidence (40-69%)**: Good signals with some uncertainty
+    - **🔴 Low Confidence (<40%)**: Limited or conflicting data
+    
+    #### 🔧 **Built-in Diagnostics:**
+    - **Data Quality Check**: Analyze bid/ask availability
+    - **Debug Mode**: Step-by-step trade analysis
+    - **Low Confidence Analysis**: Identify problem trades
+    - **API Health Monitoring**: Track response quality
+    
+    ### 📋 **Analysis Types:**
+    
+    #### 🔍 **Main Flow Analysis**
+    - All trades with enhanced buy/sell detection
+    - Confidence scoring and reasoning for each trade
+    - **NEW**: Automatic position tracking integration
+    - Short-term ETF focus section included
+    
+    #### 📍 **Position Tracking Dashboard** ⭐ NEW!
+    - **Transfer Rate Metrics**: What % of positions had follow-up activity
+    - **Active Transfers**: Positions with continued flow
+    - **Volume Analysis**: Compare follow-up to original activity  
+    - **Transfer Analytics**: Learn which patterns work best
+    - **Ticker Breakdown**: Which stocks have best follow-through
+    
+    #### 🔄 **Enhanced Buy/Sell Analysis**
+    - **Detailed confidence distribution** analysis
+    - **Side-by-side buy vs sell** comparison with premiums
+    - **Debug mode** for troubleshooting detection issues
+    - **Low confidence trade analysis** to improve data quality
+    
+    #### 🚨 **Enhanced Alert System**
+    - Incorporates buy/sell confidence into alert scoring
+    - Higher scores for high-confidence directional trades
+    - Enhanced reasoning includes confidence metrics
+    
+    #### ⚡ **ETF Flow Scanner**
+    - **NEW**: Enhanced tracking for SPY/QQQ/IWM ≤ 7 DTE
+    - All ETF trades show enhanced buy/sell detection
+    - Confidence metrics for short-term plays
+    - Buy/sell ratios for each ETF
+    
+    #### 🎯 **Pattern Recognition**
+    - Multi-leg strategies with enhanced trade sides
+    - Gamma squeeze detection with buy/sell confidence
+    - Cross-asset correlation with directional analysis
+    
+    ### 🛠️ **How Position Tracking Works:**
+    
+    #### 📊 **Automatic Tracking Criteria:**
+    - **High confidence BUY trades** (70%+ confidence)
+    - **Minimum $200K premium** threshold
+    - **Unique position ID** for precise matching
+    - **Smart expiry management** (auto-cleanup expired)
+    
+    #### 🔄 **Transfer Detection Logic:**
+    1. **Position Matching**: Exact ticker/strike/expiry/type match
+    2. **Activity Analysis**: New volume, premium, trade count
+    3. **Sentiment Analysis**: Continued buying vs selling
+    4. **Volume Comparison**: Multiples of original activity
+    5. **Confidence Tracking**: Quality of follow-up signals
+    
+    #### 📈 **Key Metrics:**
+    - **Transfer Rate**: % of tracked positions with follow-up
+    - **Volume Multiples**: How much additional flow
+    - **Sentiment Persistence**: Buying continues vs shifts to selling
+    - **Confidence Quality**: Are follow-up trades also high confidence?
+    
+    ### 💡 **Pro Tips:**
+    
+    #### 🎯 **For Best Results:**
+    1. **Run daily scans** to build tracking history
+    2. **Focus on "High Confidence Only"** filter for tracking
+    3. **Check Position Dashboard** to see what transfers
+    4. **Look for volume multiples >1.5x** for strong signals
+    5. **Monitor sentiment shifts** (buy → sell pressure)
+    
+    #### 🔍 **Troubleshooting:**
+    1. **Enable Debug Mode** if seeing too many "UNKNOWN" trades
+    2. **Check diagnostics** to see data quality metrics
+    3. **Review low confidence trades** to understand limitations
+    4. **Use Medium+ Confidence filter** for broader coverage
+    
+    ### 🚀 **What This Solves:**
+    
+    #### ❓ **Key Questions Answered:**
+    - **Do high confidence plays actually predict follow-up flow?**
+    - **Which types of options have best transfer rates?**
+    - **Do large institutional trades attract more activity?** 
+    - **How quickly do positions transfer (same day vs next day)?**
+    - **When do buying patterns shift to selling pressure?**
+    
+    #### 📊 **Edge Building:**
+    - **Validate detection quality** with real follow-up data
+    - **Learn which patterns work** vs just noise
+    - **Time entry/exit** based on transfer patterns
+    - **Risk management** when positions don't transfer
+    - **Market sentiment** from institutional flow persistence
+    
+    **Ready to track high confidence plays and see what transfers? Select your analysis type and click 'Run Enhanced Scan'!**
+    
+    ---
+    
+    ### 🔧 **Quick Start Guide:**
+    
+    1. **First Time**: Run "Main Flow Analysis" to start tracking positions
+    2. **Daily**: Check "Position Tracking Dashboard" for transfers  
+    3. **Deep Dive**: Use "Enhanced Buy/Sell Analysis" for signal quality
+    4. **Alerts**: Monitor "Enhanced Alert System" for high-priority plays
+    5. **Export**: Save data for offline analysis and backtesting
+    
+    **The system learns and improves as you use it. Start tracking today!**
     """)
 
-# --- CONTINUE WITH ENHANCED DISPLAY FUNCTIONS ---
-
-def diagnose_trade_data(trades):
-    """Enhanced diagnostic function with v2.0 insights"""
-    st.markdown("## 🔍 Enhanced Trade Data Diagnostics")
-    
-    if not trades:
-        st.error("No trades to diagnose!")
-        return
-    
-    # Sample size and quality metrics
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.write(f"**📊 Dataset Overview:**")
-        st.write(f"• Total Trades: {len(trades)}")
-        st.write(f"• Unique Tickers: {len(set(t.get('ticker') for t in trades))}")
-        st.write(f"• Time Span: {len(set(t.get('time_ny', '')[:5] for t in trades))} hours")
-    
-    with col2:
-        # Enhanced confidence analysis
-        high_conf = len([t for t in trades if t.get('side_confidence', 0) >= 0.7])
-        medium_conf = len([t for t in trades if 0.4 <= t.get('side_confidence', 0) < 0.7])
-        low_conf = len([t for t in trades if t.get('side_confidence', 0) < 0.4])
-        
-        st.write(f"**🎯 Confidence Distribution:**")
-        st.write(f"• High (≥70%): {high_conf} ({high_conf/len(trades):.1%})")
-        st.write(f"• Medium (40-69%): {medium_conf} ({medium_conf/len(trades):.1%})")
-        st.write(f"• Low (<40%): {low_conf} ({low_conf/len(trades):.1%})")
-    
-    with col3:
-        # Market context diagnostics
-        market_context = get_market_context()
-        st.write(f"**🌍 Market Context:**")
-        st.write(f"• Session: {market_context.get('market_session', 'Unknown')}")
-        st.write(f"• Volatility: {market_context.get('volatility_regime', 'Unknown')}")
-        st.write(f"• Sentiment: {market_context.get('market_sentiment', 'Unknown')}")
-    
-    # Data completeness analysis
-    st.markdown("**📋 Data Quality Assessment:**")
-    
-    fields_to_check = ['price', 'bid', 'ask', 'volume', 'open_interest', 'description', 'rule_name', 'iv']
-    completeness = {}
-    
-    for field in fields_to_check:
-        valid_count = sum(1 for t in trades if t.get(field) not in ['N/A', '', None, 0])
-        completeness[field] = valid_count / len(trades)
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.write("**Field Completeness:**")
-        for field, pct in completeness.items():
-            color = "🟢" if pct > 0.8 else "🟡" if pct > 0.5 else "🔴"
-            st.write(f"{color} {field}: {pct:.1%}")
-    
-    with col2:
-        # Enhanced pattern detection in diagnostics
-        st.write("**📊 Pattern Summary:**")
-        
-        mega_trades = len([t for t in trades if t.get('premium', 0) > 1000000])
-        st.write(f"• Mega Trades ($1M+): {mega_trades}")
-        
-        high_vol_oi = len([t for t in trades if t.get('vol_oi_ratio', 0) > 10])
-        st.write(f"• Extreme Vol/OI (>10): {high_vol_oi}")
-        
-        short_term = len([t for t in trades if t.get('dte', 30) <= 7])
-        st.write(f"• Short-term (≤7 DTE): {short_term}")
-        
-        earnings_candidates = len([t for t in trades if t.get('iv', 0) > 0.4 and t.get('dte', 30) <= 21])
-        st.write(f"• Earnings Candidates: {earnings_candidates}")
-    
-    # Sample trade inspection with enhanced analysis
-    st.markdown("**🔍 Enhanced Sample Analysis:**")
-    sample = trades[0]
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.write("**Raw Data Sample:**")
-        important_fields = ['ticker', 'price', 'bid', 'ask', 'volume', 'open_interest', 'iv', 'description', 'rule_name']
-        for key in important_fields:
-            if key in sample:
-                st.write(f"• {key}: {sample[key]} ({type(sample[key]).__name__})")
-    
-    with col2:
-        st.write("**Enhanced Analysis:**")
-        side, confidence, reasoning = determine_trade_side_enhanced(sample, debug=False)
-        
-        st.write(f"• **Detected Side**: {side}")
-        st.write(f"• **Confidence**: {confidence:.1%}")
-        st.write(f"• **Top Reason**: {reasoning[0] if reasoning else 'No signals'}")
-        
-        # Market context fit
-        context_fit = "Good" if confidence > 0.6 else "Poor"
-        st.write(f"• **Context Fit**: {context_fit}")
-        
-        # Tracking eligibility
-        is_trackable = position_tracker.is_trackable_position(sample)
-        st.write(f"• **Trackable**: {'Yes' if is_trackable else 'No'}")
-    
-    # API health diagnostics
-    st.markdown("**🔧 API Health Check:**")
-    
-    # Response time simulation (in real app, would measure actual response times)
-    response_quality = "Excellent" if completeness.get('price', 0) > 0.8 else "Good" if completeness.get('price', 0) > 0.5 else "Poor"
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.metric("Data Quality", response_quality)
-    
-    with col2:
-        avg_confidence = np.mean([t.get('side_confidence', 0) for t in trades])
-        confidence_grade = "A" if avg_confidence > 0.6 else "B" if avg_confidence > 0.4 else "C"
-        st.metric("Detection Quality", confidence_grade, f"{avg_confidence:.1%} avg")
-    
-    with col3:
-        trackable_count = len([t for t in trades if position_tracker.is_trackable_position(t)])
-        tracking_rate = trackable_count / len(trades)
-        st.metric("Tracking Rate", f"{tracking_rate:.1%}", f"{trackable_count} trades")
-    
-    # Improvement suggestions
-    if avg_confidence < 0.5:
-        st.warning("💡 **Suggestion**: Low average confidence detected. Consider enabling debug mode to identify data quality issues.")
-    
-    if trackable_count == 0:
-        st.info("💡 **Suggestion**: No trackable positions found. Try lowering minimum premium threshold or confidence requirements.")
-    
-    if completeness.get('iv', 0) < 0.3:
-        st.warning("💡 **Suggestion**: Limited IV data available. Earnings and volatility play detection may be reduced.")
-
-# Final closing for the main app
-st.markdown("---")
-st.markdown("**Enhanced Options Flow Tracker v2.0** - Transforming Options Flow Analysis with AI-Powered Insights")
